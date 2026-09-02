@@ -36,11 +36,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build/firmware dist/firmware
+          rm -rf .ci-sketch build/firmware dist/firmware
+          mkdir -p .ci-sketch/ESP32_CAM_RC_Controller build/firmware dist/firmware
+          cp firmware/ESP32_CAM_RC_Controller.ino .ci-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
+          cp firmware/partitions.csv .ci-sketch/ESP32_CAM_RC_Controller/partitions.csv
           arduino-cli compile \
             --fqbn esp32:esp32:esp32cam \
             --output-dir build/firmware \
-            firmware/ESP32_CAM_RC_Controller.ino
+            .ci-sketch/ESP32_CAM_RC_Controller
           find build/firmware -maxdepth 1 -type f -printf '%f %s bytes\n'
 
           FW="$(find build/firmware -maxdepth 1 -type f -name '*.ino.bin' ! -name '*.bootloader.bin' ! -name '*.partitions.bin' | head -n1)"
