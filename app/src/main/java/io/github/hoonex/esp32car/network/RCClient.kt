@@ -18,14 +18,14 @@ import java.util.concurrent.atomic.AtomicReference
 
 class RCClient {
     private val dispatcher = Dispatcher().apply {
-        maxRequests = 6
-        maxRequestsPerHost = 4
+        maxRequests = 8
+        maxRequestsPerHost = 6
     }
 
     private val client = OkHttpClient.Builder()
         .dispatcher(dispatcher)
         .connectTimeout(1200, TimeUnit.MILLISECONDS)
-        .readTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(1800, TimeUnit.MILLISECONDS)
         .writeTimeout(1200, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(false)
         .build()
@@ -39,33 +39,75 @@ class RCClient {
 
     private val driveCall = AtomicReference<Call?>(null)
     private val lightCall = AtomicReference<Call?>(null)
+    private val configCall = AtomicReference<Call?>(null)
     private val otaCall = AtomicReference<Call?>(null)
 
     @Volatile
     var motorTrim: Int = 0
 
     fun sendLight(ip: String, lightValue: Int) {
-        buildUrl(ip, "action") {
-            addQueryParameter("light", lightValue.coerceIn(0, 255).toString())
-        }?.let { url ->
-            val call = client.newCall(Request.Builder().url(url).build())
-            lightCall.getAndSet(call)?.cancel()
-            enqueueAndClose(call, "light")
-        }
+        requestAction(ip, "light" to lightValue.coerceIn(0, 255).toString(), slot = lightCall, label = "light")
     }
 
     fun sendCommand(ip: String, command: String, speed: Int, overrideTrim: Int? = null) {
-        val normalized = command.lowercase()
         val actualTrim = overrideTrim ?: motorTrim
-        buildUrl(ip, "action") {
-            addQueryParameter("go", normalized)
-            addQueryParameter("speed", speed.coerceIn(0, 255).toString())
-            addQueryParameter("trim", actualTrim.coerceIn(-50, 50).toString())
-        }?.let { url ->
-            val call = client.newCall(Request.Builder().url(url).build())
-            driveCall.getAndSet(call)?.cancel()
-            enqueueAndClose(call, "drive")
-        }
+        requestAction(
+            ip,
+            "go" to command.lowercase(),
+            "speed" to speed.coerceIn(0, 255).toString(),
+            "trim" to actualTrim.coerceIn(-50, 50).toString(),
+            slot = driveCall,
+            label = "drive"
+        )
+    }
+
+    fun sendMotorMix(ip: String, left: Int, right: Int) {
+        requestAction(
+            ip,
+            "left" to left.coerceIn(-255, 255).toString(),
+            "right" to right.coerceIn(-255, 255).toString(),
+            slot = driveCall,
+            label = "motor-mix"
+        )
+    }
+
+    fun setMotorConfig(ip: String, swap: Boolean, invertLeft: Boolean, invertRight: Boolean) {
+        requestAction(
+            ip,
+            "motor_swap" to if (swap) "1" else "0",
+            "invert_left" to if (invertLeft) "1" else "0",
+            "invert_right" to if (invertRight) "1" else "0",
+            slot = configCall,
+            label = "motor-config"
+        )
+    }
+
+    fun setCameraConfig(
+        ip: String,
+        frameSize: Int,
+        quality: Int,
+        brightness: Int,
+        contrast: Int,
+        saturation: Int,
+        mirror: Boolean,
+        flip: Boolean
+    ) {
+        requestAction(
+            ip,
+            "stream_size" to frameSize.toString(),
+            "stream_quality" to quality.coerceIn(4, 20).toString(),
+            "brightness" to brightness.coerceIn(-2, 2).toString(),
+            "contrast" to contrast.coerceIn(-2, 2).toString(),
+            "saturation" to saturation.coerceIn(-2, 2).toString(),
+            "hmirror" to if (mirror) "1" else "0",
+            "vflip" to if (flip) "1" else "0",
+            slot = configCall,
+            label = "camera-config"
+        )
+    }
+
+    fun reboot(ip: String) {
+        requestAction(ip, "go" to "REBOOT", slot = configCall, label = "reboot")
     }
 
     fun requestStatus(ip: String, callback: (Result<JSONObject>) -> Unit) {
@@ -157,11 +199,27 @@ class RCClient {
     fun close() {
         driveCall.getAndSet(null)?.cancel()
         lightCall.getAndSet(null)?.cancel()
+        configCall.getAndSet(null)?.cancel()
         otaCall.getAndSet(null)?.cancel()
         dispatcher.cancelAll()
         client.connectionPool.evictAll()
         otaClient.dispatcher.cancelAll()
         otaClient.connectionPool.evictAll()
+    }
+
+    private fun requestAction(
+        ip: String,
+        vararg params: Pair<String, String>,
+        slot: AtomicReference<Call?>,
+        label: String
+    ) {
+        buildUrl(ip, "action") {
+            params.forEach { (key, value) -> addQueryParameter(key, value) }
+        }?.let { url ->
+            val call = client.newCall(Request.Builder().url(url).build())
+            slot.getAndSet(call)?.cancel()
+            enqueueAndClose(call, label)
+        }
     }
 
     private fun enqueueAndClose(call: Call, label: String) {

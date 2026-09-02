@@ -13,7 +13,7 @@ permissions:
 jobs:
   firmware:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.meta.outputs.version }}
 
@@ -31,8 +31,9 @@ jobs:
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.11
+          python3 -m pip install --user esptool==5.0.2
 
-      - name: Compile ESP32-CAM firmware
+      - name: Compile AI Thinker ESP32-CAM 2WD firmware
         shell: bash
         run: |
           set -euo pipefail
@@ -58,17 +59,32 @@ jobs:
           cp "$PART" dist/firmware/partitions.bin
           cp firmware/partitions.csv dist/firmware/partitions.csv
 
+          python3 -m esptool --chip esp32 merge-bin \
+            -o dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin \
+            0x1000 dist/firmware/bootloader.bin \
+            0x8000 dist/firmware/partitions.bin \
+            0x10000 dist/firmware/firmware.bin
+          test -s dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin
+
       - name: Generate firmware manifest
         id: meta
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(grep -oP 'FW_VERSION = "\K[^"]+' firmware/ESP32_CAM_RC_Controller.ino)"
-          SHA="$(sha256sum dist/firmware/firmware.bin | awk '{print $1}')"
-          SIZE="$(stat -c%s dist/firmware/firmware.bin)"
-          printf '{"version":"%s","sha256":"%s","size":%s,"board":"AI Thinker ESP32-CAM","core":"3.3.11"}\n' "$VERSION" "$SHA" "$SIZE" > dist/firmware/manifest.json
+          APP_SHA="$(sha256sum dist/firmware/firmware.bin | awk '{print $1}')"
+          APP_SIZE="$(stat -c%s dist/firmware/firmware.bin)"
+          FACTORY_SHA="$(sha256sum dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin | awk '{print $1}')"
+          FACTORY_SIZE="$(stat -c%s dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin)"
+          printf '{"version":"%s","sha256":"%s","size":%s,"factory_sha256":"%s","factory_size":%s,"board":"AI Thinker ESP32-CAM","profile":"AI_THINKER_ESP32_CAM_2WD_L298N","flash":"4MB","core":"3.3.11"}\n' "$VERSION" "$APP_SHA" "$APP_SIZE" "$FACTORY_SHA" "$FACTORY_SIZE" > dist/firmware/manifest.json
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cat dist/firmware/manifest.json
+
+      - name: Verify merged factory image
+        shell: bash
+        run: |
+          python3 -m esptool --chip esp32 image-info dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin || true
+          sha256sum dist/firmware/*.bin
 
       - name: Upload firmware bundle
         uses: actions/upload-artifact@v4
@@ -92,7 +108,7 @@ jobs:
           name: esp32-car-firmware
           path: .ci-firmware
 
-      - name: Bundle firmware into Android APK
+      - name: Bundle AI Thinker OTA firmware into Android APK
         shell: bash
         run: |
           mkdir -p app/src/main/assets/firmware
@@ -165,6 +181,7 @@ jobs:
           Copy-Item firmware-bundle/bootloader.bin package/bundle/bootloader.bin
           Copy-Item firmware-bundle/partitions.bin package/bundle/partitions.bin
           Copy-Item firmware-bundle/firmware.bin package/bundle/firmware.bin
+          Copy-Item firmware-bundle/ESP32-CAM-AI-Thinker-2WD-factory.bin package/bundle/ESP32-CAM-AI-Thinker-2WD-factory.bin
           Copy-Item firmware-bundle/manifest.json package/bundle/manifest.json
           Compress-Archive -Path package/* -DestinationPath ESP32-Car-First-Install-Windows.zip
 
@@ -237,28 +254,34 @@ jobs:
           set -euo pipefail
           mv release/android/app-debug.apk "release/ESP32-Car-v${APP_VERSION}.apk"
           mv release/windows/ESP32-Car-First-Install-Windows.zip "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip"
-          cp release/firmware/firmware.bin "release/ESP32-Car-Firmware-v${FW_VERSION}.bin"
+          cp release/firmware/firmware.bin "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin"
+          cp release/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin"
           cp release/firmware/manifest.json release/firmware-manifest.json
           (
             cd release
             sha256sum \
               "ESP32-Car-v${APP_VERSION}.apk" \
               "ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
-              "ESP32-Car-Firmware-v${FW_VERSION}.bin" \
+              "ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
+              "ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
               firmware-manifest.json > SHA256SUMS.txt
           )
           cat > release/RELEASE_NOTES.md <<EOF
-          Android controller v${APP_VERSION}
+          ESP32 Car Android v${APP_VERSION}
 
-          - New Control / Vision / System console layout
-          - Drag joystick with STOP-on-release safety behavior
-          - Full-screen ESP32-CAM vision HUD
-          - Simplified Bluetooth, Wi-Fi, OTA, and recovery controls
-          - Bundled ESP32 firmware for phone-driven OTA updates
-          - Windows one-click package remains available for first USB flash
+          - Landscape-only RC cockpit with full-screen ESP32-CAM video
+          - Continuous 2WD tank mixing instead of four discrete direction buttons
+          - Bluetooth control + Wi-Fi video/OTA workflow
+          - Control deadzone, steering gain/expo, trim, haptics and telemetry settings
+          - Camera resolution/quality/brightness/contrast/saturation/mirror/flip controls
+          - AI tracking entry point and persistent emergency STOP
+          - AI Thinker ESP32-CAM + 2WD L298N hardware profile with motor swap/invert settings
+          - ESP32-side 450 ms dead-man failsafe
+          - OTA application image plus one-file merged factory image for 0x0 flashing
 
           Built from main commit ${GITHUB_SHA}.
           ESP32 firmware: ${FW_VERSION}.
+          Hardware: AI Thinker ESP32-CAM, 4MB flash, 2WD L298N profile.
           EOF
 
       - name: Publish GitHub Release
@@ -278,6 +301,7 @@ jobs:
             --notes-file release/RELEASE_NOTES.md \
             "release/ESP32-Car-v${APP_VERSION}.apk" \
             "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
-            "release/ESP32-Car-Firmware-v${FW_VERSION}.bin" \
+            "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
+            "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
             release/firmware-manifest.json \
             release/SHA256SUMS.txt
