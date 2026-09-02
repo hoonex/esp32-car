@@ -1,0 +1,39 @@
+name: Materialize OTA source
+
+on:
+  push:
+    branches:
+      - feat/android-ota-first-install-20260902
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout staged source
+        uses: actions/checkout@v4
+        with:
+          ref: feat/android-ota-first-install-20260902
+          fetch-depth: 0
+
+      - name: Reconstruct verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .sloar/ota/source.b64.* > /tmp/source.b64
+          base64 -d /tmp/source.b64 > /tmp/source.zip
+          echo "bf1acd160c48afdf56f25f5edb4f599b0bf495566f5e284a4fba3de296a32ba1  /tmp/source.zip" | sha256sum -c -
+          rm -rf /tmp/materialized
+          mkdir -p /tmp/materialized
+          unzip -oq /tmp/source.zip -d /tmp/materialized
+          cp -a /tmp/materialized/. .
+          rm -rf .sloar
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add Android OTA and first-install tooling"
+          git push origin HEAD:feat/android-ota-first-install-20260902
