@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,14 +47,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -67,12 +64,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -459,7 +455,11 @@ private fun DriveStick(
         Canvas(Modifier.fillMaxSize()) {
             val r = minOf(size.width, size.height) * 0.39f
             drawCircle(Color(0xAA11171E), radius = r * 1.18f)
-            drawCircle(Color.White.copy(alpha = 0.10f), radius = r * 1.18f, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()))
+            drawCircle(
+                Color.White.copy(alpha = 0.10f),
+                radius = r * 1.18f,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+            )
             drawCircle(Color(0x2226DDAA), radius = r * deadzone.coerceIn(0.02f, 0.35f))
             drawLine(Color.White.copy(alpha = 0.12f), Offset(center.x - r, center.y), Offset(center.x + r, center.y), 1.dp.toPx())
             drawLine(Color.White.copy(alpha = 0.12f), Offset(center.x, center.y - r), Offset(center.x, center.y + r), 1.dp.toPx())
@@ -467,23 +467,21 @@ private fun DriveStick(
         Surface(
             modifier = Modifier
                 .size(78.dp)
-                .padding(2.dp)
-                .align(Alignment.Center)
-                .then(Modifier),
+                .graphicsLayer {
+                    translationX = knob.x
+                    translationY = knob.y
+                },
             color = if (active) Color(0xFF6DE7B5) else Color(0xFF27313B),
             shape = CircleShape,
             shadowElevation = if (active) 16.dp else 4.dp
         ) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        translationX = knob.x
-                        translationY = knob.y
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Text("DRIVE", color = if (active) Color(0xFF042117) else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Black)
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "DRIVE",
+                    color = if (active) Color(0xFF042117) else Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Black
+                )
             }
         }
         Text(
