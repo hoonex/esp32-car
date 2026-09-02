@@ -1,36 +1,22 @@
-# ESP32-CAM RC firmware
+# ESP32 Car firmware
 
-Target: classic ESP32 / ESP32-CAM with `BluetoothSerial` support (AI Thinker camera pin map).
+Firmware `3.1.0` targets the AI Thinker ESP32-CAM used by the Keyestudio-style 2WD camera car.
 
-## Transport
+## Installation model
 
-The Android app uses **Classic Bluetooth SPP**, not BLE.
+- **First install:** flash `bootloader.bin`, `partitions.bin`, and `firmware.bin` by USB-UART. The GitHub Actions Windows artifact contains `ESP32-Car-Installer.exe` and all required binaries.
+- **Later updates:** the Android APK contains the matching `firmware.bin`. Open **Device → Firmware Update** and update over Wi-Fi.
+- **Offline/recovery:** while Bluetooth is connected, tap **복구/오프라인 업데이트 Wi-Fi 켜기**. Connect the phone to `ESP32-CAR-UPDATE` with password `esp32car`, then update using IP `192.168.4.1`.
 
-- Device name: `ESP32_CAM_RC`
-- SPP UUID: `00001101-0000-1000-8000-00805F9B34FB`
-- Commands are UTF-8 lines terminated by `\n`.
+## OTA safety
 
-### Bluetooth commands
+`partitions.csv` defines two ~1.9 MiB OTA application slots plus `otadata`. New firmware is written to the inactive slot and selected only after the image is accepted by the ESP32 Update API.
 
-| Command | Meaning |
-| --- | --- |
-| `F` / `B` / `L` / `R` / `S` | Forward / backward / left / right / stop |
-| `V50..255` | Motor speed |
-| `T-50..50` | Steering trim |
-| `H0..255` | Flash LED level |
-| `STATUS` | Return JSON status |
-| `W:SSID,PASSWORD` | Save Wi-Fi credentials |
-| `X` | Switch from Bluetooth to Wi-Fi |
+The HTTP OTA endpoint is `POST /api/ota` with binary body and `X-ESP32-OTA-Key`. The key is generated on-device, stored in NVS, and shared to the Android app through Bluetooth `STATUS`.
 
-### Wi-Fi API
+## Protocol additions
 
-- `GET /action?go=STATUS`
-- `GET /action?go=forward|backward|left|right|stop&speed=...&trim=...`
-- `GET /action?light=...`
-- `GET /action?go=MODE:BT` switches back to Bluetooth.
-- MJPEG stream: `http://<ip>:81/stream`
-- Capture: `http://<ip>/capture`
-
-## v3.0 change
-
-The previous firmware intentionally flipped the saved mode on every reboot. v3.0 keeps the last successful mode instead. If saved Wi-Fi cannot connect, it falls back to Bluetooth and persists BT as the safe mode.
+- `U` — enable recovery/update AP (`ESP32-CAR-UPDATE` / `esp32car`)
+- `STATUS` — now reports `fw`, `ota`, and `ota_key` over Bluetooth
+- `GET /api/info` — firmware/update capability summary
+- `POST /api/ota` — authenticated firmware update
