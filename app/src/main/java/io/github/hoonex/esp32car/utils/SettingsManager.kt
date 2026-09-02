@@ -14,6 +14,14 @@ class SettingsManager(context: Context) {
         get() = prefs.getString("ip_address", "192.168.4.1") ?: "192.168.4.1"
         set(value) = prefs.edit().putString("ip_address", value).apply()
 
+    var otaKey: String
+        get() = prefs.getString("ota_key", "") ?: ""
+        set(value) = prefs.edit().putString("ota_key", value).apply()
+
+    var lastFirmwareVersion: String
+        get() = prefs.getString("last_firmware_version", "") ?: ""
+        set(value) = prefs.edit().putString("last_firmware_version", value).apply()
+
     var speed: Float
         get() = prefs.getFloat("speed", 150f)
         set(value) = prefs.edit().putFloat("speed", value).apply()

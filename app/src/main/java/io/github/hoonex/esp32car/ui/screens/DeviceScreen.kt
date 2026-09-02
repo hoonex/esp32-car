@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -19,6 +20,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,6 +36,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
+import io.github.hoonex.esp32car.viewmodel.FirmwareUpdateUiState
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 
 @SuppressLint("MissingPermission")
@@ -46,6 +49,7 @@ fun DeviceScreen(viewModel: RcViewModel) {
     val btStatus by viewModel.bluetooth.btStatusResponse.collectAsStateWithLifecycle()
     val wifiStatus by viewModel.wifiStatus.collectAsStateWithLifecycle()
     val wifiError by viewModel.wifiError.collectAsStateWithLifecycle()
+    val firmwareUpdate by viewModel.firmwareUpdate.collectAsStateWithLifecycle()
 
     var ip by remember { mutableStateOf(viewModel.settings.ipAddress) }
     var refreshKey by remember { mutableStateOf(0) }
@@ -203,6 +207,75 @@ fun DeviceScreen(viewModel: RcViewModel) {
 
         item {
             Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row {
+                        Icon(Icons.Default.SystemUpdateAlt, null)
+                        Text("  Firmware Update", fontWeight = FontWeight.Bold)
+                    }
+
+                    val currentFirmware = wifiStatus?.optString("fw")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: btStatus?.optString("fw")?.takeIf { it.isNotBlank() }
+                        ?: viewModel.settings.lastFirmwareVersion.ifBlank { "unknown" }
+                    Text("ESP32 현재: $currentFirmware")
+                    Text("앱 포함: ${firmwareUpdate.bundledVersion}")
+                    Text(
+                        if (viewModel.settings.otaKey.isNotBlank()) "OTA 인증키: 준비됨" else "OTA 인증키: Bluetooth STATUS 필요",
+                        color = if (viewModel.settings.otaKey.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    )
+
+                    if (firmwareUpdate.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
+                        firmwareUpdate.stage == FirmwareUpdateUiState.Stage.REBOOTING
+                    ) {
+                        LinearProgressIndicator(
+                            progress = { firmwareUpdate.progress / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (firmwareUpdate.message.isNotBlank()) {
+                        Text(
+                            firmwareUpdate.message,
+                            color = if (firmwareUpdate.stage == FirmwareUpdateUiState.Stage.ERROR) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+
+                    Button(
+                        onClick = viewModel::updateFirmwareFromBundled,
+                        enabled = firmwareUpdate.stage !in setOf(
+                            FirmwareUpdateUiState.Stage.PREPARING,
+                            FirmwareUpdateUiState.Stage.UPLOADING,
+                            FirmwareUpdateUiState.Stage.REBOOTING
+                        )
+                    ) {
+                        Text("휴대폰으로 펌웨어 업데이트")
+                    }
+
+                    if (connectionState == ConnectionState.CONNECTED) {
+                        FilledTonalButton(onClick = viewModel::startRecoveryOtaAp) {
+                            Text("복구/오프라인 업데이트 Wi-Fi 켜기")
+                        }
+                        Text(
+                            "필요하면 ESP32-CAR-UPDATE에 연결하세요. 비밀번호 esp32car · IP 192.168.4.1",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 shape = RoundedCornerShape(20.dp)
             ) {
@@ -210,7 +283,7 @@ fun DeviceScreen(viewModel: RcViewModel) {
                     Text("Protocol", fontWeight = FontWeight.Bold)
                     Text("Classic Bluetooth SPP · UUID 00001101-0000-1000-8000-00805F9B34FB")
                     Text("Drive: F / B / L / R / S · Speed: V50..255 · Trim: T-50..50 · Light: H0..255")
-                    Text("Wi-Fi provisioning: W:SSID,PASSWORD · Switch to Wi-Fi: X · Status: STATUS")
+                    Text("Wi-Fi provisioning: W:SSID,PASSWORD · Switch to Wi-Fi: X · OTA AP: U · Status: STATUS")
                 }
             }
         }

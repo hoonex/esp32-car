@@ -14,6 +14,8 @@
 #include <Preferences.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <Update.h>
+#include <esp_system.h>
 
 // ===== 카메라 핀 정의 (AI Thinker) =====
 #define PWDN_GPIO_NUM 32
@@ -36,6 +38,13 @@
 // ===== 전역 변수 (한 번만 선언) =====
 Preferences preferences;
 BluetoothSerial SerialBT;
+
+static const char* FW_VERSION = "3.1.0";
+static const char* UPDATE_AP_SSID = "ESP32-CAR-UPDATE";
+static const char* UPDATE_AP_PASSWORD = "esp32car";
+String otaKey = "";
+bool pendingRestart = false;
+unsigned long restartAtMs = 0;
 
 int MOTOR_R_PIN_1_v = 14;
 int MOTOR_R_PIN_2_v = 15;
@@ -144,9 +153,32 @@ void setupMotorPWM(){
   motors_stop();
 }
 
-// ===== OTA =====
+// ===== OTA key / OTA =====
+String loadOrCreateOtaKey(){
+  preferences.begin("ota", false);
+  String key = preferences.getString("key", "");
+  if(key.length() < 8){
+    uint32_t r = esp_random();
+    char buf[17];
+    snprintf(buf, sizeof(buf), "%08lX%08lX", (unsigned long)r, (unsigned long)(ESP.getEfuseMac() & 0xFFFFFFFFULL));
+    key = String(buf);
+    preferences.putString("key", key);
+  }
+  preferences.end();
+  return key;
+}
+
+bool otaAuthorized(httpd_req_t *req){
+  size_t len = httpd_req_get_hdr_value_len(req, "X-ESP32-OTA-Key");
+  if(len == 0 || len > 64) return false;
+  char value[65];
+  if(httpd_req_get_hdr_value_str(req, "X-ESP32-OTA-Key", value, sizeof(value)) != ESP_OK) return false;
+  return otaKey == String(value);
+}
+
 void setupOTA(){
   ArduinoOTA.setHostname("esp32cam-rc");
+  ArduinoOTA.setPassword(otaKey.c_str());
   ArduinoOTA.onStart([](){ motors_stop(); Serial.println("[OTA] 시작"); });
   ArduinoOTA.onEnd([](){ Serial.println("\n[OTA] 완료, 리부팅"); });
   ArduinoOTA.onProgress([](unsigned int p, unsigned int t){
@@ -178,7 +210,8 @@ void savePreferredMode(const char* mode){
 
 bool connectWiFi(){
   if(wifi_ssid.length() == 0) return false;
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD);
   WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
   int attempts = 0;
   while(WiFi.status() != WL_CONNECTED && attempts < 20){
@@ -239,14 +272,14 @@ void processBluetoothCommand(String cmd){
   if(cmd == "STATUS"){
     loadWifiCredentials();
     if(isWifiMode){
-      char json[128];
-      snprintf(json, sizeof(json), "{\"mode\":\"WIFI\",\"ip\":\"%s\",\"ssid\":\"%s\",\"rssi\":%ld}", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), WiFi.RSSI());
+      char json[256];
+      snprintf(json, sizeof(json), "{\"mode\":\"WIFI\",\"ip\":\"%s\",\"ssid\":\"%s\",\"rssi\":%ld,\"fw\":\"%s\",\"ota\":true,\"ota_key\":\"%s\"}", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), WiFi.RSSI(), FW_VERSION, otaKey.c_str());
       SerialBT.println(json);
     } else {
       if(wifi_ssid.length() > 0){
-        SerialBT.println("{\"mode\":\"BT\",\"has_credentials\":true,\"ssid\":\"" + wifi_ssid + "\"}");
+        SerialBT.println("{\"mode\":\"BT\",\"has_credentials\":true,\"ssid\":\"" + wifi_ssid + "\",\"fw\":\"" + String(FW_VERSION) + "\",\"ota\":true,\"ota_key\":\"" + otaKey + "\"}");
       } else {
-        SerialBT.println("{\"mode\":\"BT\",\"has_credentials\":false}");
+        SerialBT.println("{\"mode\":\"BT\",\"has_credentials\":false,\"fw\":\"" + String(FW_VERSION) + "\",\"ota\":true,\"ota_key\":\"" + otaKey + "\"}");
       }
     }
   }
@@ -262,6 +295,18 @@ void processBluetoothCommand(String cmd){
     Serial.println("[프로비저닝] Wi-Fi 저장: " + newSsid);
   }
   else if(cmd == "X"){ switchToWifiMode(); }
+  else if(cmd == "U"){
+    motors_stop();
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD);
+    if(!camera_httpd){
+      startCamera();
+      startCameraServer();
+      setupOTA();
+    }
+    isWifiMode = true;
+    SerialBT.println("OK:OTA_AP:192.168.4.1");
+  }
   else if(cmd.startsWith("V")){
     int v = cmd.substring(1).toInt();
     if(v >= 50 && v <= 255) currentBtSpeed = v;
@@ -364,6 +409,63 @@ static esp_err_t capture_handler(httpd_req_t *req){
   return res;
 }
 
+// ===== OTA HTTP handlers =====
+static esp_err_t ota_info_handler(httpd_req_t *req){
+  char json[256];
+  String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  snprintf(json, sizeof(json), "{\"fw\":\"%s\",\"ota\":true,\"mode\":\"%s\",\"ip\":\"%s\",\"update_ap\":\"%s\"}",
+           FW_VERSION, isWifiMode ? "WIFI" : "BT", ip.c_str(), UPDATE_AP_SSID);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, json, strlen(json));
+}
+
+static esp_err_t ota_upload_handler(httpd_req_t *req){
+  if(!otaAuthorized(req)){
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+  }
+  if(req->content_len <= 0){
+    httpd_resp_set_status(req, "400 Bad Request");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"empty_firmware\"}");
+  }
+
+  motors_stop();
+  if(!Update.begin(req->content_len, U_FLASH)){
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"update_begin_failed\"}");
+  }
+
+  uint8_t buf[4096];
+  int remaining = req->content_len;
+  while(remaining > 0){
+    int received = httpd_req_recv(req, (char*)buf, min(remaining, (int)sizeof(buf)));
+    if(received == HTTPD_SOCK_ERR_TIMEOUT) continue;
+    if(received <= 0){
+      Update.abort();
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"receive_failed\"}");
+    }
+    if(Update.write(buf, received) != (size_t)received){
+      Update.abort();
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"flash_write_failed\"}");
+    }
+    remaining -= received;
+  }
+
+  if(!Update.end(true)){
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"verification_failed\"}");
+  }
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
+  pendingRestart = true;
+  restartAtMs = millis() + 1200;
+  return ESP_OK;
+}
+
 // ===== /action 핸들러 =====
 static esp_err_t action_handler(httpd_req_t *req){
   char *buf = NULL;
@@ -390,9 +492,9 @@ static esp_err_t action_handler(httpd_req_t *req){
       }
       if(httpd_query_key_value(buf, "go", param, sizeof(param)) == ESP_OK){
         if(!strcmp(param, "STATUS")){
-          char json[128];
+          char json[256];
           long rssi = WiFi.RSSI();
-          snprintf(json, sizeof(json), "{\"mode\":\"WIFI\",\"ip\":\"%s\",\"ssid\":\"%s\",\"rssi\":%ld}", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), rssi);
+          snprintf(json, sizeof(json), "{\"mode\":\"WIFI\",\"ip\":\"%s\",\"ssid\":\"%s\",\"rssi\":%ld,\"fw\":\"%s\",\"ota\":true,\"update_ap\":\"%s\"}", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), rssi, FW_VERSION, UPDATE_AP_SSID);
           httpd_resp_set_type(req, "application/json");
           return httpd_resp_send(req, json, strlen(json));
         }
@@ -440,9 +542,13 @@ void startCameraServer(){
     httpd_uri_t index_uri  = { .uri="/",       .method=HTTP_GET, .handler=index_handler,  .user_ctx=NULL };
     httpd_uri_t action_uri = { .uri="/action", .method=HTTP_GET, .handler=action_handler, .user_ctx=NULL };
     httpd_uri_t capture_uri = { .uri="/capture", .method=HTTP_GET, .handler=capture_handler, .user_ctx=NULL };
+    httpd_uri_t ota_info_uri = { .uri="/api/info", .method=HTTP_GET, .handler=ota_info_handler, .user_ctx=NULL };
+    httpd_uri_t ota_upload_uri = { .uri="/api/ota", .method=HTTP_POST, .handler=ota_upload_handler, .user_ctx=NULL };
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &action_uri);
     httpd_register_uri_handler(camera_httpd, &capture_uri);
+    httpd_register_uri_handler(camera_httpd, &ota_info_uri);
+    httpd_register_uri_handler(camera_httpd, &ota_upload_uri);
   }
   httpd_config_t conf2 = HTTPD_DEFAULT_CONFIG();
   conf2.server_port = 81; conf2.ctrl_port = 32766;
@@ -497,7 +603,8 @@ void setup(){
   Serial.begin(115200);
   delay(200);
   setupMotorPWM();
-  Serial.println("\n===== ESP32-CAM RC v3.0 =====");
+  otaKey = loadOrCreateOtaKey();
+  Serial.printf("\n===== ESP32-CAM RC v%s =====\n", FW_VERSION);
 
   preferences.begin("rc_mode", true);
   String mode = preferences.getString("mode", "BT");
@@ -532,6 +639,12 @@ void setup(){
 
 // ===== loop =====
 void loop(){
+  if(pendingRestart && (long)(millis() - restartAtMs) >= 0){
+    motors_stop();
+    delay(100);
+    ESP.restart();
+  }
+
   if (pendingBtSwitch) {
     pendingBtSwitch = false;
     switchToBluetoothMode();
