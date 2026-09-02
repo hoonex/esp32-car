@@ -1,15 +1,27 @@
 package io.github.hoonex.esp32car.ui.screens
 
 import android.annotation.SuppressLint
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
@@ -19,16 +31,19 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -52,240 +67,144 @@ fun DeviceScreen(viewModel: RcViewModel) {
     val firmwareUpdate by viewModel.firmwareUpdate.collectAsStateWithLifecycle()
 
     var ip by remember { mutableStateOf(viewModel.settings.ipAddress) }
-    var refreshKey by remember { mutableStateOf(0) }
+    var refreshKey by remember { mutableIntStateOf(0) }
     var showProvisionDialog by remember { mutableStateOf(false) }
-    val pairedDevices = remember(refreshKey, connectionState) { viewModel.pairedDevices() }
+
+    val pairedDevices = remember(refreshKey, connectionState) {
+        viewModel.pairedDevices()
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("Device", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-            Text(
-                "연결, Wi-Fi 프로비저닝, ESP32 상태",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "SYSTEM",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    "Car setup",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Black
+                )
+                Text(
+                    "Connection, network and firmware. Nothing else.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        item {
+            ConnectionCard(
+                connectionState = connectionState,
+                connectedName = connectedName,
+                connectedAddress = connectedAddress,
+                lastError = lastError,
+                hasLastDevice = viewModel.bluetooth.lastDeviceAddress() != null,
+                onReconnect = { viewModel.reconnectLast() },
+                onDisconnect = viewModel::disconnectBluetooth,
+                onRefresh = {
+                    refreshKey += 1
+                    viewModel.refreshBluetoothStatus()
+                }
+            )
+        }
+
+        if (connectionState != ConnectionState.CONNECTED) {
+            if (pairedDevices.isEmpty()) {
+                item {
+                    EmptyPairedDeviceCard()
+                }
+            } else {
+                item {
+                    SectionLabel("Paired devices")
+                }
+                items(pairedDevices, key = { it.address }) { device ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surface
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Bluetooth,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    device.name ?: "Bluetooth device",
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    device.address,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            FilledTonalButton(
+                                onClick = { viewModel.connect(device) }
+                            ) {
+                                Text("Connect")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            NetworkCard(
+                ip = ip,
+                onIpChange = { ip = it },
+                connectionState = connectionState,
+                wifiReady = wifiStatus != null,
+                wifiError = wifiError,
+                onSaveAndCheck = {
+                    viewModel.updateIp(ip)
+                    viewModel.refreshWifiStatus()
+                },
+                onProvision = { showProvisionDialog = true },
+                onSwitchToWifi = viewModel::switchEsp32ToWifi
             )
         }
 
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(24.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row {
-                        Icon(Icons.Default.Bluetooth, null)
-                        Text("  Bluetooth SPP", fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.weight(1f))
-                        IconButton(onClick = { refreshKey++ }) { Icon(Icons.Default.Refresh, "Refresh") }
-                    }
+            val currentFirmware = wifiStatus
+                ?.optString("fw")
+                ?.takeIf { it.isNotBlank() }
+                ?: btStatus
+                    ?.optString("fw")
+                    ?.takeIf { it.isNotBlank() }
+                ?: viewModel.settings.lastFirmwareVersion.ifBlank { "unknown" }
 
-                    Text(
-                        when (connectionState) {
-                            ConnectionState.CONNECTED -> "연결됨 · ${connectedName ?: connectedAddress.orEmpty()}"
-                            ConnectionState.CONNECTING -> "연결 중 · ${connectedName.orEmpty()}"
-                            ConnectionState.DISCONNECTED -> "연결 안 됨"
-                        },
-                        color = if (connectionState == ConnectionState.CONNECTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (lastError != null) {
-                        Text(lastError.orEmpty(), color = MaterialTheme.colorScheme.error)
-                    }
-
-                    if (connectionState == ConnectionState.CONNECTED) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilledTonalButton(onClick = viewModel::refreshBluetoothStatus) { Text("STATUS") }
-                            Button(onClick = viewModel::disconnectBluetooth) { Text("연결 해제") }
-                        }
-                    } else {
-                        val hasLast = viewModel.bluetooth.lastDeviceAddress() != null
-                        if (hasLast) {
-                            FilledTonalButton(onClick = { viewModel.reconnectLast() }) {
-                                Icon(Icons.Default.Link, null)
-                                Text("  마지막 기기 재연결")
-                            }
-                        }
-                    }
-
-                    if (pairedDevices.isEmpty()) {
-                        Text(
-                            "페어링된 기기가 없습니다. Android Bluetooth 설정에서 ESP32_CAM_RC를 먼저 페어링하세요.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        Text("페어링된 기기", fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
-        }
-
-        items(pairedDevices, key = { it.address }) { device ->
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(18.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(device.name ?: "Bluetooth device", fontWeight = FontWeight.Bold)
-                        Text(device.address, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    FilledTonalButton(
-                        onClick = { viewModel.connect(device) },
-                        enabled = !(connectionState == ConnectionState.CONNECTED && connectedAddress == device.address)
-                    ) {
-                        Text(if (connectedAddress == device.address && connectionState == ConnectionState.CONNECTED) "연결됨" else "연결")
-                    }
-                }
-            }
+            FirmwareCard(
+                currentFirmware = currentFirmware,
+                bundledFirmware = firmwareUpdate.bundledVersion,
+                hasOtaKey = viewModel.settings.otaKey.isNotBlank(),
+                state = firmwareUpdate,
+                bluetoothConnected = connectionState == ConnectionState.CONNECTED,
+                onUpdate = viewModel::updateFirmwareFromBundled,
+                onRecoveryAp = viewModel::startRecoveryOtaAp
+            )
         }
 
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(24.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row {
-                        Icon(Icons.Default.Wifi, null)
-                        Text("  Wi-Fi controller", fontWeight = FontWeight.Bold)
-                    }
-                    OutlinedTextField(
-                        value = ip,
-                        onValueChange = { ip = it },
-                        label = { Text("ESP32 IP") },
-                        placeholder = { Text("192.168.4.1") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = {
-                            viewModel.updateIp(ip)
-                            viewModel.refreshWifiStatus()
-                        }) { Text("저장 + 확인") }
-                        if (connectionState == ConnectionState.CONNECTED) {
-                            FilledTonalButton(onClick = { showProvisionDialog = true }) { Text("Wi-Fi 설정 전송") }
-                        }
-                    }
-
-                    when {
-                        wifiStatus != null -> Text(
-                            "응답 정상 · mode=${wifiStatus?.optString("mode", "?")}",
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        wifiError != null -> Text(wifiError.orEmpty(), color = MaterialTheme.colorScheme.error)
-                    }
-
-                    if (connectionState == ConnectionState.CONNECTED) {
-                        FilledTonalButton(onClick = viewModel::switchEsp32ToWifi) {
-                            Text("ESP32를 Wi-Fi 모드로 전환")
-                        }
-                    }
-
-                    if (btStatus != null) {
-                        Text(
-                            "ESP32 STATUS · ${btStatus.toString()}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(24.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row {
-                        Icon(Icons.Default.SystemUpdateAlt, null)
-                        Text("  Firmware Update", fontWeight = FontWeight.Bold)
-                    }
-
-                    val currentFirmware = wifiStatus?.optString("fw")
-                        ?.takeIf { it.isNotBlank() }
-                        ?: btStatus?.optString("fw")?.takeIf { it.isNotBlank() }
-                        ?: viewModel.settings.lastFirmwareVersion.ifBlank { "unknown" }
-                    Text("ESP32 현재: $currentFirmware")
-                    Text("앱 포함: ${firmwareUpdate.bundledVersion}")
-                    Text(
-                        if (viewModel.settings.otaKey.isNotBlank()) "OTA 인증키: 준비됨" else "OTA 인증키: Bluetooth STATUS 필요",
-                        color = if (viewModel.settings.otaKey.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                    )
-
-                    if (firmwareUpdate.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
-                        firmwareUpdate.stage == FirmwareUpdateUiState.Stage.REBOOTING
-                    ) {
-                        LinearProgressIndicator(
-                            progress = { firmwareUpdate.progress / 100f },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                    if (firmwareUpdate.message.isNotBlank()) {
-                        Text(
-                            firmwareUpdate.message,
-                            color = if (firmwareUpdate.stage == FirmwareUpdateUiState.Stage.ERROR) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-                        )
-                    }
-
-                    Button(
-                        onClick = viewModel::updateFirmwareFromBundled,
-                        enabled = firmwareUpdate.stage !in setOf(
-                            FirmwareUpdateUiState.Stage.PREPARING,
-                            FirmwareUpdateUiState.Stage.UPLOADING,
-                            FirmwareUpdateUiState.Stage.REBOOTING
-                        )
-                    ) {
-                        Text("휴대폰으로 펌웨어 업데이트")
-                    }
-
-                    if (connectionState == ConnectionState.CONNECTED) {
-                        FilledTonalButton(onClick = viewModel::startRecoveryOtaAp) {
-                            Text("복구/오프라인 업데이트 Wi-Fi 켜기")
-                        }
-                        Text(
-                            "필요하면 ESP32-CAR-UPDATE에 연결하세요. 비밀번호 esp32car · IP 192.168.4.1",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Protocol", fontWeight = FontWeight.Bold)
-                    Text("Classic Bluetooth SPP · UUID 00001101-0000-1000-8000-00805F9B34FB")
-                    Text("Drive: F / B / L / R / S · Speed: V50..255 · Trim: T-50..50 · Light: H0..255")
-                    Text("Wi-Fi provisioning: W:SSID,PASSWORD · Switch to Wi-Fi: X · OTA AP: U · Status: STATUS")
-                }
-            }
+            DiagnosticsCard(
+                bluetoothState = connectionState,
+                wifiReady = wifiStatus != null,
+                ip = viewModel.settings.ipAddress,
+                firmware = viewModel.settings.lastFirmwareVersion
+            )
         }
     }
 
@@ -301,6 +220,439 @@ fun DeviceScreen(viewModel: RcViewModel) {
 }
 
 @Composable
+private fun ConnectionCard(
+    connectionState: ConnectionState,
+    connectedName: String?,
+    connectedAddress: String?,
+    lastError: String?,
+    hasLastDevice: Boolean,
+    onReconnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    val connected = connectionState == ConnectionState.CONNECTED
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(26.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = CircleShape,
+                    color = if (connected) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                ) {
+                    Icon(
+                        Icons.Default.Bluetooth,
+                        contentDescription = null,
+                        tint = if (connected) {
+                            MaterialTheme.colorScheme.secondary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        when (connectionState) {
+                            ConnectionState.CONNECTED -> connectedName ?: "ESP32 Car"
+                            ConnectionState.CONNECTING -> "Connecting…"
+                            ConnectionState.DISCONNECTED -> "Bluetooth offline"
+                        },
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        connectedAddress ?: "Classic Bluetooth SPP",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onRefresh) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                }
+            }
+
+            if (lastError != null) {
+                Text(
+                    lastError,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (connected) {
+                    FilledTonalButton(onClick = onRefresh) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Status")
+                    }
+                    Button(onClick = onDisconnect) {
+                        Text("Disconnect")
+                    }
+                } else if (hasLastDevice) {
+                    Button(onClick = onReconnect) {
+                        Icon(
+                            Icons.Default.Link,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Reconnect")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyPairedDeviceCard() {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Text(
+            "No paired controller found. Pair ESP32_CAM_RC in Android Bluetooth settings, then return here.",
+            modifier = Modifier.padding(16.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontWeight = FontWeight.Bold
+    )
+}
+
+@Composable
+private fun NetworkCard(
+    ip: String,
+    onIpChange: (String) -> Unit,
+    connectionState: ConnectionState,
+    wifiReady: Boolean,
+    wifiError: String?,
+    onSaveAndCheck: () -> Unit,
+    onProvision: () -> Unit,
+    onSwitchToWifi: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(26.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Router,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    "Network",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Black
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (wifiReady) "ONLINE" else "OFFLINE",
+                    color = if (wifiReady) {
+                        MaterialTheme.colorScheme.secondary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+
+            OutlinedTextField(
+                value = ip,
+                onValueChange = onIpChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("ESP32 address") },
+                placeholder = { Text("192.168.4.1") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri
+                )
+            )
+
+            if (wifiError != null) {
+                Text(
+                    wifiError,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onSaveAndCheck) {
+                    Icon(
+                        Icons.Default.Wifi,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Save + check")
+                }
+
+                if (connectionState == ConnectionState.CONNECTED) {
+                    FilledTonalButton(onClick = onProvision) {
+                        Text("Provision")
+                    }
+                }
+            }
+
+            if (connectionState == ConnectionState.CONNECTED) {
+                FilledTonalButton(
+                    onClick = onSwitchToWifi,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Switch ESP32 to Wi-Fi mode")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FirmwareCard(
+    currentFirmware: String,
+    bundledFirmware: String,
+    hasOtaKey: Boolean,
+    state: FirmwareUpdateUiState,
+    bluetoothConnected: Boolean,
+    onUpdate: () -> Unit,
+    onRecoveryAp: () -> Unit
+) {
+    val busy = state.stage in setOf(
+        FirmwareUpdateUiState.Stage.PREPARING,
+        FirmwareUpdateUiState.Stage.UPLOADING,
+        FirmwareUpdateUiState.Stage.REBOOTING
+    )
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(26.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.SystemUpdateAlt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    "Firmware",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Black
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                VersionTile(
+                    modifier = Modifier.weight(1f),
+                    label = "CAR",
+                    version = currentFirmware
+                )
+                VersionTile(
+                    modifier = Modifier.weight(1f),
+                    label = "BUNDLED",
+                    version = bundledFirmware
+                )
+            }
+
+            Text(
+                if (hasOtaKey) {
+                    "OTA authorization ready"
+                } else {
+                    "Connect by Bluetooth and refresh Status once to get the OTA key."
+                },
+                color = if (hasOtaKey) {
+                    MaterialTheme.colorScheme.secondary
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            if (busy) {
+                LinearProgressIndicator(
+                    progress = { state.progress / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            if (state.message.isNotBlank()) {
+                Text(
+                    state.message,
+                    color = if (state.stage == FirmwareUpdateUiState.Stage.ERROR) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            Button(
+                onClick = onUpdate,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (busy) "Updating…" else "Update firmware from this phone",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            if (bluetoothConnected) {
+                FilledTonalButton(
+                    onClick = onRecoveryAp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Start offline recovery Wi-Fi")
+                }
+                Text(
+                    "Recovery AP: ESP32-CAR-UPDATE · password esp32car · 192.168.4.1",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VersionTile(
+    modifier: Modifier,
+    label: String,
+    version: String
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(
+            modifier = Modifier.padding(13.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                version,
+                fontWeight = FontWeight.Black
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsCard(
+    bluetoothState: ConnectionState,
+    wifiReady: Boolean,
+    ip: String,
+    firmware: String
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Memory,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Quick diagnostics",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            DiagnosticRow(
+                label = "Bluetooth",
+                value = bluetoothState.name.lowercase().replaceFirstChar { it.uppercase() }
+            )
+            DiagnosticRow(
+                label = "Wi-Fi",
+                value = if (wifiReady) ip.ifBlank { "Online" } else "Offline"
+            )
+            DiagnosticRow(
+                label = "Last firmware",
+                value = firmware.ifBlank { "Unknown" }
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticRow(
+    label: String,
+    value: String
+) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            value,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
 private fun WifiProvisionDialog(
     onDismiss: () -> Unit,
     onSubmit: (String, String) -> Unit
@@ -310,10 +662,12 @@ private fun WifiProvisionDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Wi-Fi 프로비저닝") },
+        title = { Text("Wi-Fi provisioning") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("ESP32가 접속할 Wi-Fi 또는 휴대폰 핫스팟 정보를 전송합니다.")
+                Text(
+                    "Send the Wi-Fi or phone-hotspot credentials that the ESP32 should join."
+                )
                 OutlinedTextField(
                     value = ssid,
                     onValueChange = { ssid = it },
@@ -332,8 +686,17 @@ private fun WifiProvisionDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSubmit(ssid, password) }, enabled = ssid.isNotBlank()) { Text("전송") }
+            TextButton(
+                onClick = { onSubmit(ssid, password) },
+                enabled = ssid.isNotBlank()
+            ) {
+                Text("Send")
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } }
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
     )
 }

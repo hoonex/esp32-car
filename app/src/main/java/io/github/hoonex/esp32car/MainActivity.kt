@@ -8,20 +8,22 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DirectionsCar
-import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,19 +32,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import io.github.hoonex.esp32car.ui.screens.AITrackingScreen
 import io.github.hoonex.esp32car.ui.screens.DeviceScreen
 import io.github.hoonex.esp32car.ui.screens.DriveScreen
-import io.github.hoonex.esp32car.ui.screens.WebControllerScreen
+import io.github.hoonex.esp32car.ui.screens.VisionScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 
-enum class AppTab(val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    DRIVE("Drive", Icons.Default.DirectionsCar),
-    CAMERA("Camera", Icons.Default.PhotoCamera),
-    AUTO("Auto", Icons.Default.SmartToy),
-    DEVICE("Device", Icons.Default.Memory)
+enum class AppTab(
+    val title: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector
+) {
+    CONTROL("Control", Icons.Default.SportsEsports),
+    VISION("Vision", Icons.Default.Videocam),
+    SYSTEM("System", Icons.Default.Settings)
 }
 
 class MainActivity : ComponentActivity() {
@@ -69,49 +73,81 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { }
 
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val needed = buildList {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                if (
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
                     add(Manifest.permission.BLUETOOTH_CONNECT)
                 }
             }
             if (needed.isNotEmpty()) launcher.launch(needed.toTypedArray())
         }
     }
+
     content()
 }
 
 @Composable
 fun MainAppScreen(viewModel: RcViewModel) {
-    var selectedTab by remember { mutableStateOf(AppTab.DRIVE) }
+    var selectedTab by remember { mutableStateOf(AppTab.CONTROL) }
 
-    Scaffold(
+    Surface(
         modifier = Modifier.fillMaxSize(),
-        bottomBar = {
-            NavigationBar {
-                AppTab.entries.forEach { tab ->
-                    NavigationBarItem(
-                        selected = selectedTab == tab,
-                        onClick = {
-                            if (selectedTab != tab) viewModel.emergencyStop()
-                            selectedTab = tab
-                        },
-                        icon = { Icon(tab.icon, tab.title) },
-                        label = { Text(tab.title) }
-                    )
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = MaterialTheme.colorScheme.background,
+            bottomBar = {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp
+                ) {
+                    AppTab.entries.forEach { tab ->
+                        NavigationBarItem(
+                            selected = selectedTab == tab,
+                            onClick = {
+                                if (selectedTab != tab) {
+                                    viewModel.emergencyStop()
+                                    selectedTab = tab
+                                }
+                            },
+                            icon = { Icon(tab.icon, tab.title) },
+                            label = { Text(tab.title) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primary,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        )
+                    }
                 }
             }
-        }
-    ) { innerPadding ->
-        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            when (selectedTab) {
-                AppTab.DRIVE -> DriveScreen(viewModel)
-                AppTab.CAMERA -> WebControllerScreen(viewModel.rcClient, viewModel.settings)
-                AppTab.AUTO -> AITrackingScreen(viewModel.rcClient, viewModel.settings)
-                AppTab.DEVICE -> DeviceScreen(viewModel)
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                when (selectedTab) {
+                    AppTab.CONTROL -> DriveScreen(
+                        viewModel = viewModel,
+                        onOpenVision = { selectedTab = AppTab.VISION }
+                    )
+                    AppTab.VISION -> VisionScreen(viewModel)
+                    AppTab.SYSTEM -> DeviceScreen(viewModel)
+                }
             }
         }
     }
