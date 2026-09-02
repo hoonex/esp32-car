@@ -4,13 +4,13 @@ on:
   push:
     branches:
       - feat/full-rebuild-20260902
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   materialize:
+    if: github.event_name == 'push' && github.event.head_commit.message == 'fix: materialize source without workflow mutation'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout staging branch
@@ -26,11 +26,14 @@ jobs:
           cat .sloar/source.b64.* > /tmp/source.b64
           base64 -d /tmp/source.b64 > /tmp/source.zip
           echo "eb169332fceaa692ae436f5e598a320bcdc156c66675406134f26101c2baee5c  /tmp/source.zip" | sha256sum -c -
-          unzip -oq /tmp/source.zip -d .
+          rm -rf /tmp/materialized
+          mkdir -p /tmp/materialized
+          unzip -oq /tmp/source.zip -d /tmp/materialized
+          rm -rf /tmp/materialized/.github
+          cp -a /tmp/materialized/. .
           rm -rf .sloar
-          rm -f .github/workflows/materialize-source.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "feat: rebuild ESP32 RC controller"
+          git commit -m "feat: rebuild ESP32 RC controller source"
           git push origin HEAD:feat/full-rebuild-20260902
