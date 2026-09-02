@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Bluetooth Signal Waves -->
+    <path
+        android:pathData="M 38,32 C 48,22 60,22 70,32"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M 44,38 C 50,32 58,32 64,38"
+        android:strokeColor="#818CF8"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- RC Car Body Silhouette -->
+    <!-- Roof / Cockpit -->
+    <path
+        android:pathData="M 44,48 L 54,42 L 64,48 L 68,58 L 40,58 Z"
+        android:fillColor="#38BDF8" />
+    <!-- Main Chassis -->
+    <path
+        android:pathData="M 30,58 C 30,55 34,55 38,55 L 70,55 C 74,55 78,55 78,58 L 80,70 C 80,74 76,76 70,76 L 38,76 C 32,76 28,74 28,70 Z"
+        android:fillColor="#0284C7" />
+
+    <!-- Front & Rear Wheels -->
+    <path
+        android:pathData="M 24,54 L 30,54 L 30,66 L 24,66 Z"
+        android:fillColor="#F43F5E" />
+    <path
+        android:pathData="M 78,54 L 84,54 L 84,66 L 78,66 Z"
+        android:fillColor="#F43F5E" />
+    <path
+        android:pathData="M 24,70 L 30,70 L 30,82 L 24,82 Z"
+        android:fillColor="#F43F5E" />
+    <path
+        android:pathData="M 78,70 L 84,70 L 84,82 L 78,82 Z"
+        android:fillColor="#F43F5E" />
+
+    <!-- Cyan Headlights -->
+    <path
+        android:pathData="M 42,44 L 46,44 L 45,47 L 41,47 Z"
+        android:fillColor="#38BDF8" />
+    <path
+        android:pathData="M 62,44 L 66,44 L 67,47 L 63,47 Z"
+        android:fillColor="#38BDF8" />
+</vector>
