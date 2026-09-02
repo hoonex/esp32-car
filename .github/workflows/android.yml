@@ -2,7 +2,7 @@ name: Build Android + Firmware
 
 on:
   push:
-    branches: [main, 'feat/**', 'fix/**']
+    branches: [main, 'feat/**', 'fix/**', 'chore/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -174,3 +174,110 @@ jobs:
           name: esp32-car-first-install-windows
           path: ESP32-Car-First-Install-Windows.zip
           if-no-files-found: error
+
+  release-android:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [firmware, android, windows-installer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve Android release version
+        id: release_meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -n1)"
+          test -n "$VERSION"
+          TAG="android-v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists; leaving published assets immutable."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download Android APK
+        if: steps.release_meta.outputs.exists != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32-car-ota-debug-apk
+          path: release/android
+
+      - name: Download Windows first-install package
+        if: steps.release_meta.outputs.exists != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32-car-first-install-windows
+          path: release/windows
+
+      - name: Download firmware bundle
+        if: steps.release_meta.outputs.exists != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32-car-firmware
+          path: release/firmware
+
+      - name: Prepare release assets
+        if: steps.release_meta.outputs.exists != 'true'
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.release_meta.outputs.version }}
+          FW_VERSION: ${{ needs.firmware.outputs.version }}
+        run: |
+          set -euo pipefail
+          mv release/android/app-debug.apk "release/ESP32-Car-v${APP_VERSION}.apk"
+          mv release/windows/ESP32-Car-First-Install-Windows.zip "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip"
+          cp release/firmware/firmware.bin "release/ESP32-Car-Firmware-v${FW_VERSION}.bin"
+          cp release/firmware/manifest.json release/firmware-manifest.json
+          (
+            cd release
+            sha256sum \
+              "ESP32-Car-v${APP_VERSION}.apk" \
+              "ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
+              "ESP32-Car-Firmware-v${FW_VERSION}.bin" \
+              firmware-manifest.json > SHA256SUMS.txt
+          )
+          cat > release/RELEASE_NOTES.md <<EOF
+          Android controller v${APP_VERSION}
+
+          - New Control / Vision / System console layout
+          - Drag joystick with STOP-on-release safety behavior
+          - Full-screen ESP32-CAM vision HUD
+          - Simplified Bluetooth, Wi-Fi, OTA, and recovery controls
+          - Bundled ESP32 firmware for phone-driven OTA updates
+          - Windows one-click package remains available for first USB flash
+
+          Built from main commit ${GITHUB_SHA}.
+          ESP32 firmware: ${FW_VERSION}.
+          EOF
+
+      - name: Publish GitHub Release
+        if: steps.release_meta.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+          APP_VERSION: ${{ steps.release_meta.outputs.version }}
+          FW_VERSION: ${{ needs.firmware.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ESP32 Car Android v${APP_VERSION}" \
+            --notes-file release/RELEASE_NOTES.md \
+            "release/ESP32-Car-v${APP_VERSION}.apk" \
+            "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
+            "release/ESP32-Car-Firmware-v${FW_VERSION}.bin" \
+            release/firmware-manifest.json \
+            release/SHA256SUMS.txt
