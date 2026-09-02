@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   materialize:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'fix: materialize source without workflow mutation'
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout staging branch
