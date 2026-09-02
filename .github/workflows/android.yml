@@ -3,7 +3,7 @@ name: Android CI
 on:
   push:
     branches:
-      - feat/full-rebuild-20260902
+      - main
   pull_request:
     branches:
       - main
