@@ -68,6 +68,9 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             bluetooth.connectionState.collect { state ->
                 if (state == ConnectionState.CONNECTED) {
+                    // Bluetooth SPP is the primary low-latency control path. Wi-Fi can stay active for video.
+                    _transportMode.value = TransportMode.BLUETOOTH
+                    settings.preferredMode = "BT"
                     syncBluetoothTuning()
                     bluetooth.sendCommand(RcProtocol.STATUS)
                 }
@@ -98,16 +101,24 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         emergencyStop()
         _transportMode.value = mode
         settings.preferredMode = if (mode == TransportMode.BLUETOOTH) "BT" else "WIFI"
-        if (mode == TransportMode.WIFI) refreshWifiStatus()
+        if (mode == TransportMode.WIFI && settings.ipAddress.isNotBlank()) refreshWifiStatus()
     }
 
     fun pairedDevices(): List<BluetoothDevice> = bluetooth.getPairedDevices()
     fun connect(device: BluetoothDevice) = bluetooth.connectToDevice(device)
+    fun pairAndConnect(device: BluetoothDevice) = bluetooth.pairAndConnect(device)
+    fun scanBluetooth() = bluetooth.startDiscovery(RcProtocol.DEVICE_NAME)
+    fun stopBluetoothScan() = bluetooth.stopDiscovery()
     fun reconnectLast(): Boolean = bluetooth.reconnectLastDevice()
     fun disconnectBluetooth() = bluetooth.disconnect()
 
+    fun isControlLinkReady(): Boolean = when (_transportMode.value) {
+        TransportMode.BLUETOOTH -> bluetooth.connectionState.value == ConnectionState.CONNECTED
+        TransportMode.WIFI -> settings.ipAddress.isNotBlank()
+    }
+
     fun updateIp(ip: String) {
-        settings.ipAddress = ip.trim().removePrefix("http://").removeSuffix("/")
+        settings.ipAddress = ip.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/")
         _wifiStatus.value = null
         _wifiError.value = null
     }
@@ -135,26 +146,40 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         val normalized = value.coerceIn(0f, 255f)
         settings.light = normalized
         _light.value = normalized
-        if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
-            bluetooth.sendCommand(RcProtocol.light(normalized))
-        }
-        if (settings.ipAddress.isNotBlank()) {
-            rcClient.sendLight(settings.ipAddress, normalized.toInt())
+        when (_transportMode.value) {
+            TransportMode.BLUETOOTH -> {
+                if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+                    bluetooth.sendCommand(RcProtocol.light(normalized))
+                }
+            }
+            TransportMode.WIFI -> {
+                if (settings.ipAddress.isNotBlank()) rcClient.sendLight(settings.ipAddress, normalized.toInt())
+            }
         }
     }
 
     fun drive(direction: DriveDirection) {
         when (_transportMode.value) {
-            TransportMode.BLUETOOTH -> bluetooth.sendCommand(RcProtocol.bluetoothDrive(direction))
-            TransportMode.WIFI -> rcClient.sendCommand(
-                settings.ipAddress,
-                RcProtocol.wifiDrive(direction),
-                settings.speed.toInt()
-            )
+            TransportMode.BLUETOOTH -> {
+                if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+                    bluetooth.sendCommand(RcProtocol.bluetoothDrive(direction))
+                }
+            }
+            TransportMode.WIFI -> {
+                if (settings.ipAddress.isNotBlank()) {
+                    rcClient.sendCommand(
+                        settings.ipAddress,
+                        RcProtocol.wifiDrive(direction),
+                        settings.speed.toInt()
+                    )
+                }
+            }
         }
     }
 
     fun driveVector(throttleInput: Float, steeringInput: Float) {
+        if (!isControlLinkReady()) return
+
         val deadzone = settings.controlDeadzone.coerceIn(0.02f, 0.35f)
         fun shape(value: Float): Float {
             val magnitude = abs(value)
@@ -172,8 +197,8 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         steering = steering.coerceIn(-1f, 1f)
 
         val trimNorm = (settings.trim / 100f).coerceIn(-0.5f, 0.5f)
-        var left = (throttle + steering + trimNorm).coerceIn(-1f, 1f)
-        var right = (throttle - steering - trimNorm).coerceIn(-1f, 1f)
+        val left = (throttle + steering + trimNorm).coerceIn(-1f, 1f)
+        val right = (throttle - steering - trimNorm).coerceIn(-1f, 1f)
         val maxSpeed = settings.speed.roundToInt().coerceIn(50, 255)
         val leftPwm = (left * maxSpeed).roundToInt()
         val rightPwm = (right * maxSpeed).roundToInt()
@@ -191,22 +216,34 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
 
     fun emergencyStop() {
         when (_transportMode.value) {
-            TransportMode.BLUETOOTH -> bluetooth.sendCommand(RcProtocol.bluetoothDrive(DriveDirection.STOP))
-            TransportMode.WIFI -> rcClient.sendMotorMix(settings.ipAddress, 0, 0)
+            TransportMode.BLUETOOTH -> {
+                if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+                    bluetooth.sendCommand(RcProtocol.bluetoothDrive(DriveDirection.STOP))
+                }
+            }
+            TransportMode.WIFI -> {
+                if (settings.ipAddress.isNotBlank()) rcClient.sendMotorMix(settings.ipAddress, 0, 0)
+            }
         }
     }
 
     fun provisionWifi(ssid: String, password: String) {
-        if (ssid.isBlank()) return
+        if (ssid.isBlank() || bluetooth.connectionState.value != ConnectionState.CONNECTED) return
         bluetooth.sendCommand(RcProtocol.provisionWifi(ssid, password))
         bluetooth.sendCommand(RcProtocol.STATUS)
     }
 
     fun switchEsp32ToWifi() {
-        bluetooth.sendCommand(RcProtocol.SWITCH_TO_WIFI)
+        if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+            bluetooth.sendCommand(RcProtocol.SWITCH_TO_WIFI)
+        }
     }
 
     fun startRecoveryOtaAp() {
+        if (bluetooth.connectionState.value != ConnectionState.CONNECTED) {
+            failFirmwareUpdate("Bluetooth를 먼저 연결하세요.")
+            return
+        }
         settings.ipAddress = "192.168.4.1"
         bluetooth.sendCommand(RcProtocol.START_OTA_AP)
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
@@ -217,14 +254,18 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshBluetoothStatus() {
-        bluetooth.sendCommand(RcProtocol.STATUS)
+        if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+            bluetooth.sendCommand(RcProtocol.STATUS)
+        } else {
+            bluetooth.connectPreferredOrDiscover(RcProtocol.DEVICE_NAME)
+        }
     }
 
     fun refreshWifiStatus() {
         val ip = settings.ipAddress
         if (ip.isBlank()) {
-            _wifiError.value = "ESP32 IP를 입력하세요."
             _wifiStatus.value = null
+            _wifiError.value = null
             return
         }
         _wifiError.value = null
@@ -243,6 +284,10 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun applyCameraConfig() {
+        if (settings.ipAddress.isBlank()) {
+            _wifiError.value = "카메라를 사용하려면 먼저 ESP32 Wi-Fi를 시작하세요."
+            return
+        }
         val size = when (settings.streamResolution.uppercase()) {
             "QQVGA" -> 0
             "HQVGA" -> 2
@@ -268,8 +313,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         val invertRight = settings.invertRightMotor
         if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
             bluetooth.sendCommand(RcProtocol.motorConfig(swap, invertLeft, invertRight))
-        }
-        if (settings.ipAddress.isNotBlank()) {
+        } else if (settings.ipAddress.isNotBlank()) {
             rcClient.setMotorConfig(settings.ipAddress, swap, invertLeft, invertRight)
         }
     }

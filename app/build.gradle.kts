@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.hoonex.esp32car"
         minSdk = 24
         targetSdk = 36
-        versionCode = 6
-        versionName = "3.1.0"
+        versionCode = 7
+        versionName = "3.1.1"
 
         // Current app target devices are modern Galaxy/Android phones and tablets.
         // OpenCV ships very large native libraries for several CPU ABIs; keeping
