@@ -262,7 +262,6 @@ class ClassicBluetoothManager(context: Context) {
                 val started = runCatching { device.createBond() }.getOrDefault(false)
                 if (!started) {
                     pendingBondAddress = null
-                    // Some ESP32 SPP stacks allow RFCOMM to trigger pairing themselves.
                     connectToDevice(device)
                 }
             }
@@ -374,6 +373,7 @@ class ClassicBluetoothManager(context: Context) {
         rediscoveryJob?.cancel()
         rediscoveryJob = scope.launch {
             delay(500)
+            rediscoveryJob = null
             if (_connectionState.value == ConnectionState.DISCONNECTED && isBluetoothEnabled()) {
                 startDiscovery(fallback)
             }
