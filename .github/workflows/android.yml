@@ -41,30 +41,73 @@ jobs:
           mkdir -p .ci-sketch/ESP32_CAM_RC_Controller build/firmware dist/firmware
           cp firmware/ESP32_CAM_RC_Controller.ino .ci-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
           cp firmware/partitions.csv .ci-sketch/ESP32_CAM_RC_Controller/partitions.csv
+
           arduino-cli compile \
             --fqbn esp32:esp32:esp32cam \
             --output-dir build/firmware \
             .ci-sketch/ESP32_CAM_RC_Controller
+
           find build/firmware -maxdepth 1 -type f -printf '%f %s bytes\n'
 
           FW="$(find build/firmware -maxdepth 1 -type f -name '*.ino.bin' ! -name '*.bootloader.bin' ! -name '*.partitions.bin' | head -n1)"
           BOOT="$(find build/firmware -maxdepth 1 -type f -name '*.bootloader.bin' | head -n1)"
           PART="$(find build/firmware -maxdepth 1 -type f -name '*.partitions.bin' | head -n1)"
-          test -n "$FW" && test -n "$BOOT" && test -n "$PART"
+          BOOT_APP0="$(find "$HOME/.arduino15/packages/esp32/hardware/esp32/3.3.11/tools/partitions" -maxdepth 1 -type f -name 'boot_app0.bin' | head -n1)"
+          test -n "$FW" && test -n "$BOOT" && test -n "$PART" && test -n "$BOOT_APP0"
+          test -s "$FW" && test -s "$BOOT" && test -s "$PART" && test -s "$BOOT_APP0"
 
           FW_SIZE="$(stat -c%s "$FW")"
           test "$FW_SIZE" -lt 1945600
+
           cp "$FW" dist/firmware/firmware.bin
           cp "$BOOT" dist/firmware/bootloader.bin
           cp "$PART" dist/firmware/partitions.bin
+          cp "$BOOT_APP0" dist/firmware/boot_app0.bin
           cp firmware/partitions.csv dist/firmware/partitions.csv
+
+          cat > dist/firmware/flash_args.txt <<'EOF'
+          --flash-mode keep --flash-freq keep --flash-size keep
+          0x1000 bootloader.bin
+          0x8000 partitions.bin
+          0xe000 boot_app0.bin
+          0x10000 firmware.bin
+          EOF
 
           python3 -m esptool --chip esp32 merge-bin \
             -o dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin \
+            --flash-mode keep \
+            --flash-freq keep \
+            --flash-size keep \
             0x1000 dist/firmware/bootloader.bin \
             0x8000 dist/firmware/partitions.bin \
+            0xe000 dist/firmware/boot_app0.bin \
             0x10000 dist/firmware/firmware.bin
           test -s dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin
+
+      - name: Verify Arduino-compatible flash layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('dist/firmware')
+          merged = (root / 'ESP32-CAM-AI-Thinker-2WD-factory.bin').read_bytes()
+          layout = [
+              (0x1000, 'bootloader.bin'),
+              (0x8000, 'partitions.bin'),
+              (0xE000, 'boot_app0.bin'),
+              (0x10000, 'firmware.bin'),
+          ]
+          for offset, name in layout:
+              data = (root / name).read_bytes()
+              actual = merged[offset:offset + len(data)]
+              if actual != data:
+                  raise SystemExit(f'{name} mismatch at 0x{offset:X}')
+              print(f'OK 0x{offset:05X} {name} {len(data)} bytes')
+          PY
+          grep -Fx '0xe000 boot_app0.bin' dist/firmware/flash_args.txt
+          sha256sum dist/firmware/*.bin
 
       - name: Generate firmware manifest
         id: meta
@@ -74,17 +117,12 @@ jobs:
           VERSION="$(grep -oP 'FW_VERSION = "\K[^"]+' firmware/ESP32_CAM_RC_Controller.ino)"
           APP_SHA="$(sha256sum dist/firmware/firmware.bin | awk '{print $1}')"
           APP_SIZE="$(stat -c%s dist/firmware/firmware.bin)"
+          BOOT_APP0_SHA="$(sha256sum dist/firmware/boot_app0.bin | awk '{print $1}')"
           FACTORY_SHA="$(sha256sum dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin | awk '{print $1}')"
           FACTORY_SIZE="$(stat -c%s dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin)"
-          printf '{"version":"%s","sha256":"%s","size":%s,"factory_sha256":"%s","factory_size":%s,"board":"AI Thinker ESP32-CAM","profile":"AI_THINKER_ESP32_CAM_2WD_L298N","flash":"4MB","core":"3.3.11"}\n' "$VERSION" "$APP_SHA" "$APP_SIZE" "$FACTORY_SHA" "$FACTORY_SIZE" > dist/firmware/manifest.json
+          printf '{"version":"%s","sha256":"%s","size":%s,"boot_app0_sha256":"%s","factory_sha256":"%s","factory_size":%s,"board":"AI Thinker ESP32-CAM","profile":"AI_THINKER_ESP32_CAM_2WD_L298N","flash":"4MB","core":"3.3.11","flash_layout":"arduino-esp32-4-image","boot_app0_offset":"0xE000"}\n' "$VERSION" "$APP_SHA" "$APP_SIZE" "$BOOT_APP0_SHA" "$FACTORY_SHA" "$FACTORY_SIZE" > dist/firmware/manifest.json
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cat dist/firmware/manifest.json
-
-      - name: Verify merged factory image
-        shell: bash
-        run: |
-          python3 -m esptool --chip esp32 image-info dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin || true
-          sha256sum dist/firmware/*.bin
 
       - name: Upload firmware bundle
         uses: actions/upload-artifact@v4
@@ -180,10 +218,29 @@ jobs:
           Copy-Item dist/ESP32-Car-Installer.exe package/ESP32-Car-Installer.exe
           Copy-Item firmware-bundle/bootloader.bin package/bundle/bootloader.bin
           Copy-Item firmware-bundle/partitions.bin package/bundle/partitions.bin
+          Copy-Item firmware-bundle/boot_app0.bin package/bundle/boot_app0.bin
           Copy-Item firmware-bundle/firmware.bin package/bundle/firmware.bin
           Copy-Item firmware-bundle/ESP32-CAM-AI-Thinker-2WD-factory.bin package/bundle/ESP32-CAM-AI-Thinker-2WD-factory.bin
+          Copy-Item firmware-bundle/flash_args.txt package/bundle/flash_args.txt
           Copy-Item firmware-bundle/manifest.json package/bundle/manifest.json
           Compress-Archive -Path package/* -DestinationPath ESP32-Car-First-Install-Windows.zip
+
+      - name: Verify first-install package contains all Arduino images
+        shell: pwsh
+        run: |
+          Expand-Archive ESP32-Car-First-Install-Windows.zip -DestinationPath verify-package
+          $required = @(
+            'verify-package/ESP32-Car-Installer.exe',
+            'verify-package/bundle/bootloader.bin',
+            'verify-package/bundle/partitions.bin',
+            'verify-package/bundle/boot_app0.bin',
+            'verify-package/bundle/firmware.bin',
+            'verify-package/bundle/flash_args.txt'
+          )
+          foreach ($path in $required) {
+            if (!(Test-Path $path)) { throw "Missing installer asset: $path" }
+          }
+          Select-String -Path verify-package/bundle/flash_args.txt -Pattern '^0xe000 boot_app0\.bin$'
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
@@ -218,45 +275,61 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists; leaving published assets immutable."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download Android APK
+      - name: Download Android APK artifact
         if: steps.release_meta.outputs.exists != 'true'
         uses: actions/download-artifact@v4
         with:
           name: esp32-car-ota-debug-apk
           path: release/android
 
+      - name: Download existing published APK without replacing it
+        if: steps.release_meta.outputs.exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+          APP_VERSION: ${{ steps.release_meta.outputs.version }}
+        run: |
+          mkdir -p release/android
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "ESP32-Car-v${APP_VERSION}.apk" \
+            --dir release/android
+
       - name: Download Windows first-install package
-        if: steps.release_meta.outputs.exists != 'true'
         uses: actions/download-artifact@v4
         with:
           name: esp32-car-first-install-windows
           path: release/windows
 
       - name: Download firmware bundle
-        if: steps.release_meta.outputs.exists != 'true'
         uses: actions/download-artifact@v4
         with:
           name: esp32-car-firmware
           path: release/firmware
 
       - name: Prepare release assets
-        if: steps.release_meta.outputs.exists != 'true'
         shell: bash
         env:
           APP_VERSION: ${{ steps.release_meta.outputs.version }}
           FW_VERSION: ${{ needs.firmware.outputs.version }}
+          RELEASE_EXISTS: ${{ steps.release_meta.outputs.exists }}
         run: |
           set -euo pipefail
-          mv release/android/app-debug.apk "release/ESP32-Car-v${APP_VERSION}.apk"
+          if [ "$RELEASE_EXISTS" = "true" ]; then
+            cp "release/android/ESP32-Car-v${APP_VERSION}.apk" "release/ESP32-Car-v${APP_VERSION}.apk"
+          else
+            mv release/android/app-debug.apk "release/ESP32-Car-v${APP_VERSION}.apk"
+          fi
           mv release/windows/ESP32-Car-First-Install-Windows.zip "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip"
           cp release/firmware/firmware.bin "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin"
           cp release/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin"
           cp release/firmware/manifest.json release/firmware-manifest.json
+          cp release/firmware/flash_args.txt release/flash_args.txt
           (
             cd release
             sha256sum \
@@ -264,27 +337,26 @@ jobs:
               "ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
               "ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
               "ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
-              firmware-manifest.json > SHA256SUMS.txt
+              firmware-manifest.json \
+              flash_args.txt > SHA256SUMS.txt
           )
           cat > release/RELEASE_NOTES.md <<EOF
           ESP32 Car Android v${APP_VERSION}
 
-          - Landscape-only RC cockpit with full-screen ESP32-CAM video
-          - Continuous 2WD tank mixing instead of four discrete direction buttons
-          - Bluetooth control + Wi-Fi video/OTA workflow
-          - Control deadzone, steering gain/expo, trim, haptics and telemetry settings
-          - Camera resolution/quality/brightness/contrast/saturation/mirror/flip controls
-          - AI tracking entry point and persistent emergency STOP
-          - AI Thinker ESP32-CAM + 2WD L298N hardware profile with motor swap/invert settings
+          - Landscape RC cockpit with ESP32-CAM video and Bluetooth/Wi-Fi control
+          - AI Thinker ESP32-CAM + 2WD L298N hardware profile
           - ESP32-side 450 ms dead-man failsafe
-          - OTA application image plus one-file merged factory image for 0x0 flashing
+          - Android app OTA firmware update support
+          - First-install package now matches the official Arduino ESP32 upload layout exactly:
+            0x1000 bootloader, 0x8000 partitions, 0xE000 boot_app0, 0x10000 application
+          - Factory image contains all four required images, including boot_app0 / OTA-data initialization
 
           Built from main commit ${GITHUB_SHA}.
           ESP32 firmware: ${FW_VERSION}.
           Hardware: AI Thinker ESP32-CAM, 4MB flash, 2WD L298N profile.
           EOF
 
-      - name: Publish GitHub Release
+      - name: Publish new GitHub Release
         if: steps.release_meta.outputs.exists != 'true'
         shell: bash
         env:
@@ -304,4 +376,26 @@ jobs:
             "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
             "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
             release/firmware-manifest.json \
+            release/flash_args.txt \
             release/SHA256SUMS.txt
+
+      - name: Repair existing release firmware assets without replacing APK
+        if: steps.release_meta.outputs.exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+          APP_VERSION: ${{ steps.release_meta.outputs.version }}
+          FW_VERSION: ${{ needs.firmware.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
+            "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
+            "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
+            release/firmware-manifest.json \
+            release/flash_args.txt \
+            release/SHA256SUMS.txt
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release/RELEASE_NOTES.md
