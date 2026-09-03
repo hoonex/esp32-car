@@ -29,6 +29,12 @@ object RcProtocol {
         DriveDirection.STOP -> "stop"
     }
 
+    fun motorMix(left: Int, right: Int): String =
+        "M:${left.coerceIn(-255, 255)},${right.coerceIn(-255, 255)}"
+
+    fun motorConfig(swap: Boolean, invertLeft: Boolean, invertRight: Boolean): String =
+        "C:${if (swap) 1 else 0},${if (invertLeft) 1 else 0},${if (invertRight) 1 else 0}"
+
     fun speed(value: Number): String = "V${value.toInt().coerceIn(MIN_SPEED, MAX_SPEED)}"
     fun trim(value: Number): String = "T${value.toInt().coerceIn(MIN_TRIM, MAX_TRIM)}"
     fun light(value: Number): String = "H${value.toInt().coerceIn(MIN_LIGHT, MAX_LIGHT)}"
@@ -37,4 +43,5 @@ object RcProtocol {
     const val STATUS = "STATUS"
     const val SWITCH_TO_WIFI = "X"
     const val START_OTA_AP = "U"
+    const val REBOOT = "REBOOT"
 }

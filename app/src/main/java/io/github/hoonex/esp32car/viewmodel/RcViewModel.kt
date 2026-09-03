@@ -19,6 +19,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.math.abs
+import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sign
 
 
 data class FirmwareUpdateUiState(
@@ -36,7 +40,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     val rcClient = RCClient().apply { motorTrim = settings.trim.toInt() }
 
     private val _transportMode = MutableStateFlow(
-        if (settings.preferredMode == "BT") TransportMode.BLUETOOTH else TransportMode.WIFI
+        if (settings.preferredMode == "WIFI") TransportMode.WIFI else TransportMode.BLUETOOTH
     )
     val transportMode: StateFlow<TransportMode> = _transportMode.asStateFlow()
 
@@ -73,7 +77,6 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             bluetooth.wifiConnectedEvent.collect { ip ->
                 if (ip.isNotBlank()) {
                     settings.ipAddress = ip
-                    setTransportMode(TransportMode.WIFI)
                     refreshWifiStatus()
                 }
             }
@@ -83,12 +86,16 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                 status ?: return@collect
                 status.optString("ota_key").takeIf { it.isNotBlank() }?.let { settings.otaKey = it }
                 status.optString("fw").takeIf { it.isNotBlank() }?.let { settings.lastFirmwareVersion = it }
-                status.optString("ip").takeIf { it.isNotBlank() }?.let { settings.ipAddress = it }
+                status.optString("ip").takeIf { it.isNotBlank() && it != "0.0.0.0" }?.let { settings.ipAddress = it }
+                if (status.has("motor_swap")) settings.swapMotors = status.optBoolean("motor_swap")
+                if (status.has("invert_left")) settings.invertLeftMotor = status.optBoolean("invert_left")
+                if (status.has("invert_right")) settings.invertRightMotor = status.optBoolean("invert_right")
             }
         }
     }
 
     fun setTransportMode(mode: TransportMode) {
+        emergencyStop()
         _transportMode.value = mode
         settings.preferredMode = if (mode == TransportMode.BLUETOOTH) "BT" else "WIFI"
         if (mode == TransportMode.WIFI) refreshWifiStatus()
@@ -128,9 +135,11 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         val normalized = value.coerceIn(0f, 255f)
         settings.light = normalized
         _light.value = normalized
-        when (_transportMode.value) {
-            TransportMode.BLUETOOTH -> bluetooth.sendCommand(RcProtocol.light(normalized))
-            TransportMode.WIFI -> rcClient.sendLight(settings.ipAddress, normalized.toInt())
+        if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+            bluetooth.sendCommand(RcProtocol.light(normalized))
+        }
+        if (settings.ipAddress.isNotBlank()) {
+            rcClient.sendLight(settings.ipAddress, normalized.toInt())
         }
     }
 
@@ -145,7 +154,47 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun emergencyStop() = drive(DriveDirection.STOP)
+    fun driveVector(throttleInput: Float, steeringInput: Float) {
+        val deadzone = settings.controlDeadzone.coerceIn(0.02f, 0.35f)
+        fun shape(value: Float): Float {
+            val magnitude = abs(value)
+            if (magnitude <= deadzone) return 0f
+            val remapped = ((magnitude - deadzone) / (1f - deadzone)).coerceIn(0f, 1f)
+            return value.sign * remapped
+        }
+
+        var throttle = shape(throttleInput.coerceIn(-1f, 1f))
+        var steering = shape(steeringInput.coerceIn(-1f, 1f))
+        if (settings.invertThrottle) throttle = -throttle
+        if (settings.invertSteering) steering = -steering
+
+        steering = steering.sign * abs(steering).pow(settings.steeringExpo) * settings.steeringGain
+        steering = steering.coerceIn(-1f, 1f)
+
+        val trimNorm = (settings.trim / 100f).coerceIn(-0.5f, 0.5f)
+        var left = (throttle + steering + trimNorm).coerceIn(-1f, 1f)
+        var right = (throttle - steering - trimNorm).coerceIn(-1f, 1f)
+        val maxSpeed = settings.speed.roundToInt().coerceIn(50, 255)
+        val leftPwm = (left * maxSpeed).roundToInt()
+        val rightPwm = (right * maxSpeed).roundToInt()
+
+        if (leftPwm == 0 && rightPwm == 0) {
+            emergencyStop()
+            return
+        }
+
+        when (_transportMode.value) {
+            TransportMode.BLUETOOTH -> bluetooth.sendCommand(RcProtocol.motorMix(leftPwm, rightPwm))
+            TransportMode.WIFI -> rcClient.sendMotorMix(settings.ipAddress, leftPwm, rightPwm)
+        }
+    }
+
+    fun emergencyStop() {
+        when (_transportMode.value) {
+            TransportMode.BLUETOOTH -> bluetooth.sendCommand(RcProtocol.bluetoothDrive(DriveDirection.STOP))
+            TransportMode.WIFI -> rcClient.sendMotorMix(settings.ipAddress, 0, 0)
+        }
+    }
 
     fun provisionWifi(ssid: String, password: String) {
         if (ssid.isBlank()) return
@@ -163,7 +212,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
             stage = FirmwareUpdateUiState.Stage.IDLE,
             progress = 0,
-            message = "ESP32-CAR-UPDATE Wi-Fi에 연결한 뒤 업데이트를 누르세요. 비밀번호: esp32car"
+            message = "ESP32-CAR-UPDATE Wi-Fi에 연결하세요 · 비밀번호 esp32car · IP 192.168.4.1"
         )
     }
 
@@ -193,6 +242,47 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun applyCameraConfig() {
+        val size = when (settings.streamResolution.uppercase()) {
+            "QQVGA" -> 0
+            "HQVGA" -> 2
+            "VGA" -> 7
+            "SVGA" -> 8
+            else -> 4
+        }
+        rcClient.setCameraConfig(
+            ip = settings.ipAddress,
+            frameSize = size,
+            quality = settings.streamQuality.toInt(),
+            brightness = settings.cameraBrightness.toInt(),
+            contrast = settings.cameraContrast.toInt(),
+            saturation = settings.cameraSaturation.toInt(),
+            mirror = settings.cameraMirror,
+            flip = settings.cameraFlip
+        )
+    }
+
+    fun applyMotorConfig() {
+        val swap = settings.swapMotors
+        val invertLeft = settings.invertLeftMotor
+        val invertRight = settings.invertRightMotor
+        if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+            bluetooth.sendCommand(RcProtocol.motorConfig(swap, invertLeft, invertRight))
+        }
+        if (settings.ipAddress.isNotBlank()) {
+            rcClient.setMotorConfig(settings.ipAddress, swap, invertLeft, invertRight)
+        }
+    }
+
+    fun rebootDevice() {
+        emergencyStop()
+        if (bluetooth.connectionState.value == ConnectionState.CONNECTED) {
+            bluetooth.sendCommand(RcProtocol.REBOOT)
+        } else if (settings.ipAddress.isNotBlank()) {
+            rcClient.reboot(settings.ipAddress)
+        }
+    }
+
     fun updateFirmwareFromBundled() {
         val ip = settings.ipAddress
         val key = settings.otaKey
@@ -201,14 +291,15 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (key.isBlank()) {
-            failFirmwareUpdate("OTA 키가 없습니다. Bluetooth로 연결한 뒤 STATUS를 한 번 새로고침하세요.")
+            failFirmwareUpdate("OTA 키가 없습니다. Bluetooth 연결 후 STATUS를 새로고침하세요.")
             return
         }
 
+        emergencyStop()
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
             stage = FirmwareUpdateUiState.Stage.PREPARING,
             progress = 0,
-            message = "앱에 포함된 펌웨어 준비 중"
+            message = "AI Thinker 2WD 펌웨어 준비 중"
         )
 
         viewModelScope.launch {
@@ -230,7 +321,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     _firmwareUpdate.value = _firmwareUpdate.value.copy(
                         stage = FirmwareUpdateUiState.Stage.UPLOADING,
                         progress = percent,
-                        message = "ESP32로 펌웨어 전송 중 · $percent%"
+                        message = "ESP32로 전송 중 · $percent%"
                     )
                 }
             ) { result ->
@@ -238,7 +329,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     _firmwareUpdate.value = _firmwareUpdate.value.copy(
                         stage = FirmwareUpdateUiState.Stage.REBOOTING,
                         progress = 100,
-                        message = "업데이트 완료. ESP32 재부팅 및 재연결 확인 중"
+                        message = "플래시 완료 · ESP32 재부팅 확인 중"
                     )
                     viewModelScope.launch {
                         delay(3500)
@@ -275,6 +366,9 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         bluetooth.sendCommand(RcProtocol.speed(settings.speed))
         bluetooth.sendCommand(RcProtocol.trim(settings.trim))
         bluetooth.sendCommand(RcProtocol.light(settings.light))
+        bluetooth.sendCommand(
+            RcProtocol.motorConfig(settings.swapMotors, settings.invertLeftMotor, settings.invertRightMotor)
+        )
     }
 
     private fun readBundledFirmwareVersion(): String = runCatching {
