@@ -11,8 +11,16 @@ android {
         applicationId = "io.github.hoonex.esp32car"
         minSdk = 24
         targetSdk = 36
-        versionCode = 4
-        versionName = "3.0.0"
+        versionCode = 5
+        versionName = "3.0.1"
+
+        // Current app target devices are modern Galaxy/Android phones and tablets.
+        // OpenCV ships very large native libraries for several CPU ABIs; keeping
+        // only arm64-v8a cuts the downloadable APK size dramatically without
+        // removing AI tracking/OpenCV functionality on these devices.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
