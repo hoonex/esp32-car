@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -71,13 +70,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.network.MjpegParser
 import io.github.hoonex.esp32car.update.AppUpdateStage
@@ -116,15 +115,14 @@ fun ReliableCockpitScreen(viewModel: RcViewModel) {
         onDispose { viewModel.emergencyStop() }
     }
 
-    when (btState) {
-        ConnectionState.CONNECTED -> ConnectedCockpit(
+    if (btState == ConnectionState.CONNECTED) {
+        ConnectedCockpit(
             viewModel = viewModel,
             connectedName = connectedName ?: "ESP32_CAM_RC",
             updateState = updateState
         )
-
-        ConnectionState.CONNECTING,
-        ConnectionState.DISCONNECTED -> ManualConnectionScreen(
+    } else {
+        ManualConnectionScreen(
             viewModel = viewModel,
             btState = btState,
             discovered = discovered,
@@ -146,6 +144,7 @@ private fun ManualConnectionScreen(
     updateState: AppUpdateState
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val paired = runCatching { viewModel.pairedDevices() }.getOrDefault(emptyList())
     val allDevices = remember(discovered, paired) {
         (paired + discovered)
@@ -161,7 +160,7 @@ private fun ManualConnectionScreen(
         val compact = maxHeight < 420.dp
         val outer = if (compact) 12.dp else 22.dp
         val gap = if (compact) 12.dp else 20.dp
-        val titleSize = if (compact) 28.sp else 38.sp
+        val titleSize = if (compact) 26.sp else 38.sp
 
         Row(
             modifier = Modifier.fillMaxSize().padding(outer),
@@ -191,16 +190,16 @@ private fun ManualConnectionScreen(
                     Text(
                         "연결 전에는 조종 화면을 띄우지 않습니다.\n검색하고 ESP32_CAM_RC를 직접 선택하세요.",
                         color = Muted,
-                        fontSize = if (compact) 11.sp else 13.sp,
-                        lineHeight = if (compact) 15.sp else 18.sp
+                        fontSize = if (compact) 10.sp else 13.sp,
+                        lineHeight = if (compact) 14.sp else 18.sp
                     )
 
                     if (btState == ConnectionState.CONNECTING) {
                         Surface(color = Color(0x2219D790), shape = RoundedCornerShape(14.dp)) {
-                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                                Text("CONNECTING", color = Accent, fontWeight = FontWeight.Black, fontSize = 12.sp)
+                            Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("CONNECTING", color = Accent, fontWeight = FontWeight.Black, fontSize = 11.sp)
                                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                                Text("선택한 기기에 Classic Bluetooth SPP 연결 중", color = Muted, fontSize = 10.sp)
+                                Text("선택한 기기에 Classic Bluetooth SPP 연결 중", color = Muted, fontSize = 9.sp)
                             }
                         }
                     }
@@ -210,15 +209,19 @@ private fun ManualConnectionScreen(
                     state = updateState,
                     compact = compact,
                     onCheck = {
-                        val activity = context as? Activity ?: return@UpdateCard
-                        activity.lifecycleScopeSafe { AppUpdater.checkForUpdate(activity, installWhenReady = true) }
+                        val activity = context as? Activity
+                        if (activity != null) {
+                            scope.launch { AppUpdater.checkForUpdate(activity, installWhenReady = true) }
+                        }
                     },
                     onAction = {
-                        val activity = context as? Activity ?: return@UpdateCard
-                        when (updateState.stage) {
-                            AppUpdateStage.READY -> AppUpdater.installReadyUpdate(activity)
-                            AppUpdateStage.SIGNATURE_MISMATCH -> AppUpdater.openReleasePage(activity)
-                            else -> activity.lifecycleScopeSafe { AppUpdater.checkForUpdate(activity, installWhenReady = true) }
+                        val activity = context as? Activity
+                        if (activity != null) {
+                            when (updateState.stage) {
+                                AppUpdateStage.READY -> AppUpdater.installReadyUpdate(activity)
+                                AppUpdateStage.SIGNATURE_MISMATCH -> AppUpdater.openReleasePage(activity)
+                                else -> scope.launch { AppUpdater.checkForUpdate(activity, installWhenReady = true) }
+                            }
                         }
                     }
                 )
@@ -231,58 +234,72 @@ private fun ManualConnectionScreen(
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
             ) {
                 Column(
-                    modifier = Modifier.fillMaxSize().padding(if (compact) 14.dp else 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (compact) 9.dp else 12.dp)
+                    modifier = Modifier.fillMaxSize().padding(if (compact) 13.dp else 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Bluetooth 연결", color = Color.White, fontWeight = FontWeight.Black, fontSize = if (compact) 16.sp else 20.sp)
-                            Text("자동연결 없음 · 직접 검색/선택", color = Muted, fontSize = 10.sp)
+                            Text(
+                                "Bluetooth 연결",
+                                color = Color.White,
+                                fontWeight = FontWeight.Black,
+                                fontSize = if (compact) 15.sp else 20.sp
+                            )
+                            Text("자동연결 없음 · 직접 검색/선택", color = Muted, fontSize = 9.sp)
                         }
 
                         if (!viewModel.bluetooth.isBluetoothEnabled()) {
                             Button(onClick = {
                                 runCatching { context.startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
                             }) {
-                                Text("Bluetooth 켜기", fontSize = 10.sp)
+                                Text("Bluetooth 켜기", fontSize = 9.sp)
                             }
                         } else {
-                            Button(
-                                onClick = {
-                                    if (discovering) viewModel.stopBluetoothScan() else viewModel.scanBluetooth()
-                                }
-                            ) {
-                                Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(if (discovering) "검색 중지" else "검색", fontSize = 10.sp)
+                            Button(onClick = {
+                                if (discovering) viewModel.stopBluetoothScan() else viewModel.scanBluetooth()
+                            }) {
+                                Icon(Icons.Default.Refresh, null, Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text(if (discovering) "검색 중지" else "검색", fontSize = 9.sp)
                             }
                         }
                     }
 
-                    if (discovering) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
+                    if (discovering) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
                     btError?.let {
                         Surface(color = Color(0x331E0D12), shape = RoundedCornerShape(12.dp)) {
-                            Text(it, Modifier.padding(10.dp), color = Color(0xFFFFA0AA), fontSize = 10.sp)
+                            Text(it, Modifier.padding(9.dp), color = Color(0xFFFFA0AA), fontSize = 9.sp)
                         }
                     }
 
                     if (allDevices.isEmpty() && !discovering) {
                         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(Icons.Default.Bluetooth, null, Modifier.size(if (compact) 34.dp else 44.dp), tint = Color(0xFF4E5A65))
-                                Text("검색 버튼을 눌러 ESP32_CAM_RC를 찾으세요", color = Muted, fontSize = 11.sp)
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Bluetooth,
+                                    null,
+                                    Modifier.size(if (compact) 32.dp else 44.dp),
+                                    tint = Color(0xFF4E5A65)
+                                )
+                                Text("검색 버튼을 눌러 ESP32_CAM_RC를 찾으세요", color = Muted, fontSize = 10.sp)
                             }
                         }
                     } else {
                         LazyColumn(
                             modifier = Modifier.weight(1f).fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(7.dp)
                         ) {
-                            items(allDevices, key = { runCatching { it.address }.getOrDefault(it.hashCode().toString()) }) { device ->
-                                val bonded = runCatching { device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)
+                            items(
+                                items = allDevices,
+                                key = { runCatching { it.address }.getOrDefault(it.hashCode().toString()) }
+                            ) { device ->
+                                val bonded = runCatching {
+                                    device.bondState == BluetoothDevice.BOND_BONDED
+                                }.getOrDefault(false)
                                 DeviceConnectRow(
                                     device = device,
                                     bonded = bonded,
@@ -297,9 +314,9 @@ private fun ManualConnectionScreen(
                     }
 
                     Text(
-                        "폰 Bluetooth 목록에 ESP32_CAM_RC가 보이는데 여기서 안 보이면 검색을 한 번 중지한 뒤 다시 시작하세요.",
+                        "폰 Bluetooth 목록에 ESP32_CAM_RC가 보이는데 여기서 안 보이면 검색을 중지한 뒤 다시 시작하세요.",
                         color = Color(0xFF66727D),
-                        fontSize = 9.sp
+                        fontSize = 8.sp
                     )
                 }
             }
@@ -328,30 +345,30 @@ private fun DeviceConnectRow(
         )
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = if (compact) 8.dp else 10.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = if (compact) 7.dp else 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(color = if (target) Color(0x3319D790) else Color(0xFF1B232C), shape = CircleShape) {
                 Icon(
                     Icons.Default.Bluetooth,
                     null,
-                    Modifier.padding(9.dp).size(17.dp),
+                    Modifier.padding(8.dp).size(16.dp),
                     tint = if (target) Accent else Color(0xFF9CA7B1)
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
-                Text(name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text(name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 Text(
                     "${if (bonded) "페어링됨" else "새 기기"} · ${device.safeAddress()}",
                     color = Muted,
-                    fontSize = 9.sp,
+                    fontSize = 8.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
             Button(onClick = onClick, enabled = enabled) {
-                Text(if (bonded) "CONNECT" else "PAIR & CONNECT", fontSize = 9.sp)
+                Text(if (bonded) "CONNECT" else "PAIR & CONNECT", fontSize = 8.sp)
             }
         }
     }
@@ -379,9 +396,9 @@ private fun ConnectedCockpit(
         val edge = if (compact) 10.dp else 16.dp
         val stickSize = minOf(maxHeight * if (compact) 0.48f else 0.52f, maxWidth * 0.23f)
         val actionWidth = minOf(maxWidth * 0.18f, if (compact) 132.dp else 152.dp)
-        val actionHeight = if (compact) 40.dp else 48.dp
+        val actionHeight = if (compact) 39.dp else 48.dp
 
-        ReliableCameraLayer(
+        CameraLayer(
             ip = viewModel.settings.ipAddress,
             retryKey = cameraRetry,
             modifier = Modifier.fillMaxSize()
@@ -402,26 +419,43 @@ private fun ConnectedCockpit(
             border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
         ) {
             Row(
-                Modifier.padding(horizontal = if (compact) 12.dp else 16.dp, vertical = if (compact) 7.dp else 9.dp),
+                Modifier.padding(
+                    horizontal = if (compact) 11.dp else 16.dp,
+                    vertical = if (compact) 6.dp else 9.dp
+                ),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 10.dp)
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 10.dp)
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text("ESP32 CAR", color = Color.White, fontWeight = FontWeight.Black, fontSize = if (compact) 14.sp else 17.sp)
-                    Text(connectedName, color = Accent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "ESP32 CAR",
+                        color = Color.White,
+                        fontWeight = FontWeight.Black,
+                        fontSize = if (compact) 13.sp else 17.sp
+                    )
+                    Text(connectedName, color = Accent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
                 }
                 SmallPill("BT CONNECTED", true)
-                if (!compact) SmallPill(if (viewModel.settings.ipAddress.isBlank()) "CAMERA OFF" else viewModel.settings.ipAddress, viewModel.settings.ipAddress.isNotBlank())
-                if (updateState.stage == AppUpdateStage.DOWNLOADING) {
-                    SmallPill("UPDATE ${updateState.progress}%", true)
-                } else if (updateState.stage == AppUpdateStage.SIGNATURE_MISMATCH) {
-                    SmallPill("UPDATE ACTION", false)
+                if (!compact) {
+                    SmallPill(
+                        if (viewModel.settings.ipAddress.isBlank()) "CAMERA OFF" else viewModel.settings.ipAddress,
+                        viewModel.settings.ipAddress.isNotBlank()
+                    )
+                }
+                when (updateState.stage) {
+                    AppUpdateStage.DOWNLOADING -> SmallPill("UPDATE ${updateState.progress}%", true)
+                    AppUpdateStage.SIGNATURE_MISMATCH,
+                    AppUpdateStage.ERROR -> SmallPill("UPDATE ACTION", false)
+                    else -> Unit
                 }
             }
         }
 
-        ReliableDrivePad(
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = edge + 6.dp, bottom = edge + 4.dp).size(stickSize),
+        DrivePad(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = edge + 6.dp, bottom = edge + 4.dp)
+                .size(stickSize),
             deadzone = viewModel.settings.controlDeadzone,
             onVector = viewModel::driveVector,
             onStop = viewModel::emergencyStop
@@ -430,19 +464,19 @@ private fun ConnectedCockpit(
         Column(
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = edge),
             horizontalAlignment = Alignment.End,
-            verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 9.dp)
+            verticalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 9.dp)
         ) {
             CockpitAction(
                 width = actionWidth,
                 height = actionHeight,
-                icon = { Icon(Icons.Default.Lightbulb, null, Modifier.size(17.dp)) },
+                icon = { Icon(Icons.Default.Lightbulb, null, Modifier.size(16.dp)) },
                 label = if (light > 0f) "LIGHT ${light.toInt()}" else "LIGHT",
                 onClick = { viewModel.updateLight(if (light > 0f) 0f else 220f) }
             )
             CockpitAction(
                 width = actionWidth,
                 height = actionHeight,
-                icon = { Icon(Icons.Default.Videocam, null, Modifier.size(17.dp)) },
+                icon = { Icon(Icons.Default.Videocam, null, Modifier.size(16.dp)) },
                 label = "CAMERA",
                 onClick = {
                     viewModel.switchEsp32ToWifi()
@@ -452,7 +486,7 @@ private fun ConnectedCockpit(
             CockpitAction(
                 width = actionWidth,
                 height = actionHeight,
-                icon = { Icon(Icons.Default.Settings, null, Modifier.size(17.dp)) },
+                icon = { Icon(Icons.Default.Settings, null, Modifier.size(16.dp)) },
                 label = "SETTINGS",
                 onClick = {
                     viewModel.emergencyStop()
@@ -462,12 +496,12 @@ private fun ConnectedCockpit(
             Button(
                 onClick = viewModel::emergencyStop,
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD83A4A)),
-                shape = RoundedCornerShape(15.dp),
-                modifier = Modifier.width(actionWidth).height(if (compact) 46.dp else 56.dp)
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.width(actionWidth).height(if (compact) 45.dp else 56.dp)
             ) {
-                Icon(Icons.Default.Stop, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("STOP", fontWeight = FontWeight.Black, fontSize = if (compact) 12.sp else 14.sp)
+                Icon(Icons.Default.Stop, null, Modifier.size(17.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("STOP", fontWeight = FontWeight.Black, fontSize = if (compact) 11.sp else 14.sp)
             }
         }
 
@@ -478,14 +512,21 @@ private fun ConnectedCockpit(
             border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.07f))
         ) {
             Row(
-                Modifier.padding(horizontal = if (compact) 10.dp else 14.dp, vertical = if (compact) 5.dp else 7.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                Modifier.padding(
+                    horizontal = if (compact) 9.dp else 14.dp,
+                    vertical = if (compact) 4.dp else 7.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("MAX ${speed.toInt()}", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Text("MAX ${speed.toInt()}", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
                 if (!compact) {
-                    Text("FW ${wifiStatus?.optString("fw").orEmpty().ifBlank { viewModel.settings.lastFirmwareVersion }}", color = Muted, fontSize = 9.sp)
-                    Text("FAILSAFE 450ms", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "FW ${wifiStatus?.optString("fw").orEmpty().ifBlank { viewModel.settings.lastFirmwareVersion }}",
+                        color = Muted,
+                        fontSize = 8.sp
+                    )
+                    Text("FAILSAFE 450ms", color = Accent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -516,11 +557,14 @@ private fun CockpitAction(
         onClick = onClick,
         modifier = Modifier.width(width).height(height),
         shape = RoundedCornerShape(14.dp),
-        colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xD9141A21), contentColor = Color.White)
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = Color(0xD9141A21),
+            contentColor = Color.White
+        )
     ) {
         icon()
-        Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(5.dp))
+        Text(label, fontSize = 9.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -529,14 +573,23 @@ private fun SmallPill(text: String, good: Boolean) {
     Surface(
         color = if (good) Color(0x2219D790) else Color(0x28FF5364),
         shape = RoundedCornerShape(999.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, if (good) Accent.copy(alpha = 0.35f) else Danger.copy(alpha = 0.35f))
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (good) Accent.copy(alpha = 0.35f) else Danger.copy(alpha = 0.35f)
+        )
     ) {
-        Text(text, Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+        Text(
+            text,
+            Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            color = Color.White,
+            fontSize = 7.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
 @Composable
-private fun ReliableDrivePad(
+private fun DrivePad(
     modifier: Modifier,
     deadzone: Float,
     onVector: (Float, Float) -> Unit,
@@ -547,6 +600,7 @@ private fun ReliableDrivePad(
     var active by remember { mutableStateOf(false) }
     var throttle by remember { mutableFloatStateOf(0f) }
     var steering by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
 
     fun reset() {
         active = false
@@ -578,20 +632,22 @@ private fun ReliableDrivePad(
     }
 
     Box(
-        modifier = modifier.onSizeChanged { size = it }.pointerInput(Unit) {
-            detectDragGestures(
-                onDragStart = {
-                    active = true
-                    update(it)
-                },
-                onDrag = { change, _ ->
-                    change.consume()
-                    update(change.position)
-                },
-                onDragEnd = { reset() },
-                onDragCancel = { reset() }
-            )
-        },
+        modifier = modifier
+            .onSizeChanged { size = it }
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = {
+                        active = true
+                        update(it)
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        update(change.position)
+                    },
+                    onDragEnd = { reset() },
+                    onDragCancel = { reset() }
+                )
+            },
         contentAlignment = Alignment.Center
     ) {
         Canvas(Modifier.fillMaxSize()) {
@@ -605,9 +661,14 @@ private fun ReliableDrivePad(
             drawCircle(Color(0x2219D790), radius = r * deadzone.coerceIn(0.02f, 0.35f))
         }
 
-        val knobSize = if (size.height > 0) (minOf(size.width, size.height) * 0.28f).coerceAtLeast(52f) else 64f
+        val knobPixels = if (size.height > 0) {
+            (minOf(size.width, size.height) * 0.28f).coerceAtLeast(52f)
+        } else {
+            64f
+        }
+        val knobDp = with(density) { knobPixels.toDp() }
         Surface(
-            modifier = Modifier.size(with(androidx.compose.ui.platform.LocalDensity.current) { knobSize.toDp() }).graphicsLayer {
+            modifier = Modifier.size(knobDp).graphicsLayer {
                 translationX = knob.x
                 translationY = knob.y
             },
@@ -616,7 +677,12 @@ private fun ReliableDrivePad(
             shadowElevation = if (active) 12.dp else 3.dp
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("DRIVE", color = if (active) Color(0xFF042117) else Color.White, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                Text(
+                    "DRIVE",
+                    color = if (active) Color(0xFF042117) else Color.White,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Black
+                )
             }
         }
     }
@@ -643,18 +709,23 @@ private fun SettingsOverlay(
     var password by remember { mutableStateOf("") }
     var ip by remember { mutableStateOf(viewModel.settings.ipAddress) }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = Color(0xFA080C11)
-    ) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFA080C11)) {
         Column(Modifier.fillMaxSize()) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = if (compact) 8.dp else 12.dp),
+                Modifier.fillMaxWidth().padding(
+                    horizontal = 16.dp,
+                    vertical = if (compact) 7.dp else 12.dp
+                ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text("SETTINGS", color = Color.White, fontWeight = FontWeight.Black, fontSize = if (compact) 16.sp else 20.sp)
-                    Text("가로 화면 전용 · 연결은 수동", color = Muted, fontSize = 9.sp)
+                    Text(
+                        "SETTINGS",
+                        color = Color.White,
+                        fontWeight = FontWeight.Black,
+                        fontSize = if (compact) 15.sp else 20.sp
+                    )
+                    Text("가로 화면 전용 · Bluetooth 연결은 수동", color = Muted, fontSize = 8.sp)
                 }
                 IconButton(onClick = onClose) {
                     Icon(Icons.Default.Close, "Close", tint = Color.White)
@@ -662,29 +733,29 @@ private fun SettingsOverlay(
             }
 
             Row(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 3.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(11.dp)
                 ) {
                     item {
                         SettingsSection("Bluetooth", "현재 연결: ${connectedDeviceName ?: "ESP32_CAM_RC"}") {
                             OutlinedButton(onClick = viewModel::disconnectBluetooth, modifier = Modifier.fillMaxWidth()) {
-                                Icon(Icons.Default.Bluetooth, null)
+                                Icon(Icons.Default.Bluetooth, null, Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("연결 해제 후 연결 화면으로")
+                                Text("연결 해제 후 연결 화면으로", fontSize = 10.sp)
                             }
                         }
                     }
                     item {
                         SettingsSection("Drive tuning", "조종 감도와 출력") {
-                            Text("Max motor output · ${speed.toInt()}", color = Color.White, fontSize = 11.sp)
+                            Text("Max motor output · ${speed.toInt()}", color = Color.White, fontSize = 10.sp)
                             Slider(value = speed, onValueChange = viewModel::updateSpeed, valueRange = 50f..255f)
-                            Text("Steering trim · ${trim.toInt()}", color = Color.White, fontSize = 11.sp)
+                            Text("Steering trim · ${trim.toInt()}", color = Color.White, fontSize = 10.sp)
                             Slider(value = trim, onValueChange = viewModel::updateTrim, valueRange = -50f..50f)
-                            Text("Deadzone · ${(deadzone * 100).toInt()}%", color = Color.White, fontSize = 11.sp)
+                            Text("Deadzone · ${(deadzone * 100).toInt()}%", color = Color.White, fontSize = 10.sp)
                             Slider(
                                 value = deadzone,
                                 onValueChange = {
@@ -698,17 +769,24 @@ private fun SettingsOverlay(
                     item {
                         SettingsSection("ESP32 firmware", "Bundled ${fw.bundledVersion}") {
                             if (fw.stage != FirmwareUpdateUiState.Stage.IDLE) {
-                                LinearProgressIndicator(progress = { fw.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
-                                Text(fw.message, color = if (fw.stage == FirmwareUpdateUiState.Stage.ERROR) Danger else Muted, fontSize = 10.sp)
+                                LinearProgressIndicator(
+                                    progress = { fw.progress.coerceIn(0, 100) / 100f },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    fw.message,
+                                    color = if (fw.stage == FirmwareUpdateUiState.Stage.ERROR) Danger else Muted,
+                                    fontSize = 9.sp
+                                )
                             }
                             Button(
                                 onClick = viewModel::updateFirmwareFromBundled,
                                 enabled = viewModel.settings.ipAddress.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(Icons.Default.SystemUpdate, null)
+                                Icon(Icons.Default.SystemUpdate, null, Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("ESP32 OTA")
+                                Text("ESP32 OTA", fontSize = 10.sp)
                             }
                         }
                     }
@@ -716,7 +794,7 @@ private fun SettingsOverlay(
 
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(11.dp)
                 ) {
                     item {
                         SettingsSection("Wi-Fi camera", "Bluetooth 조종과 별도로 카메라 연결") {
@@ -735,11 +813,14 @@ private fun SettingsOverlay(
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { viewModel.provisionWifi(ssid, password) }, enabled = ssid.isNotBlank()) {
-                                    Text("Wi-Fi 저장")
+                                Button(
+                                    onClick = { viewModel.provisionWifi(ssid, password) },
+                                    enabled = ssid.isNotBlank()
+                                ) {
+                                    Text("Wi-Fi 저장", fontSize = 9.sp)
                                 }
                                 Button(onClick = viewModel::switchEsp32ToWifi) {
-                                    Text("카메라 시작")
+                                    Text("카메라 시작", fontSize = 9.sp)
                                 }
                             }
                             OutlinedTextField(
@@ -752,39 +833,53 @@ private fun SettingsOverlay(
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
-                            FilledTonalButton(onClick = viewModel::refreshWifiStatus, enabled = ip.isNotBlank()) {
-                                Icon(Icons.Default.Wifi, null)
+                            FilledTonalButton(
+                                onClick = viewModel::refreshWifiStatus,
+                                enabled = ip.isNotBlank()
+                            ) {
+                                Icon(Icons.Default.Wifi, null, Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Wi-Fi STATUS")
+                                Text("Wi-Fi STATUS", fontSize = 9.sp)
                             }
                             wifiStatus?.let {
-                                Text("${it.optString("ssid")} · ${it.optString("ip")}", color = Accent, fontSize = 10.sp)
+                                Text(
+                                    "${it.optString("ssid")} · ${it.optString("ip")}",
+                                    color = Accent,
+                                    fontSize = 9.sp
+                                )
                             }
-                            wifiError?.let { Text(it, color = Danger, fontSize = 10.sp) }
+                            wifiError?.let { Text(it, color = Danger, fontSize = 9.sp) }
                         }
                     }
 
                     item {
-                        SettingsSection("Android app update", "시작할 때 자동으로 최신 릴리즈를 확인") {
+                        SettingsSection("Android app update", "앱 시작 시 자동으로 최신 릴리즈 확인") {
                             UpdateCard(
                                 state = updateState,
                                 compact = compact,
                                 onCheck = {
-                                    val activity = context as? Activity ?: return@UpdateCard
-                                    scope.launch { AppUpdater.checkForUpdate(activity, installWhenReady = true) }
+                                    val activity = context as? Activity
+                                    if (activity != null) {
+                                        scope.launch {
+                                            AppUpdater.checkForUpdate(activity, installWhenReady = true)
+                                        }
+                                    }
                                 },
                                 onAction = {
-                                    val activity = context as? Activity ?: return@UpdateCard
-                                    when (updateState.stage) {
-                                        AppUpdateStage.READY -> AppUpdater.installReadyUpdate(activity)
-                                        AppUpdateStage.SIGNATURE_MISMATCH -> AppUpdater.openReleasePage(activity)
-                                        else -> scope.launch { AppUpdater.checkForUpdate(activity, installWhenReady = true) }
+                                    val activity = context as? Activity
+                                    if (activity != null) {
+                                        when (updateState.stage) {
+                                            AppUpdateStage.READY -> AppUpdater.installReadyUpdate(activity)
+                                            AppUpdateStage.SIGNATURE_MISMATCH -> AppUpdater.openReleasePage(activity)
+                                            else -> scope.launch {
+                                                AppUpdater.checkForUpdate(activity, installWhenReady = true)
+                                            }
+                                        }
                                     }
                                 }
                             )
                         }
                     }
-
                     item { Spacer(Modifier.height(18.dp)) }
                 }
             }
@@ -804,11 +899,11 @@ private fun SettingsSection(
         border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.06f))
     ) {
         Column(
-            Modifier.fillMaxWidth().padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp)
+            Modifier.fillMaxWidth().padding(13.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-            Text(subtitle, color = Muted, fontSize = 9.sp)
+            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text(subtitle, color = Muted, fontSize = 8.sp)
             content()
         }
     }
@@ -827,35 +922,54 @@ private fun UpdateCard(
     Surface(
         color = if (problem) Color(0x2FFF5364) else Color(0x1E19D790),
         shape = RoundedCornerShape(16.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, if (problem) Danger.copy(alpha = 0.35f) else Accent.copy(alpha = 0.28f))
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (problem) Danger.copy(alpha = 0.35f) else Accent.copy(alpha = 0.28f)
+        )
     ) {
         Column(
-            Modifier.fillMaxWidth().padding(if (compact) 11.dp else 13.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp)
+            Modifier.fillMaxWidth().padding(if (compact) 10.dp else 13.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.SystemUpdate, null, Modifier.size(16.dp), tint = if (problem) Danger else Accent)
-                Spacer(Modifier.width(7.dp))
-                Text("APP UPDATE", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Black)
+                Icon(
+                    Icons.Default.SystemUpdate,
+                    null,
+                    Modifier.size(15.dp),
+                    tint = if (problem) Danger else Accent
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("APP UPDATE", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Black)
                 Spacer(Modifier.weight(1f))
                 if (state.currentVersion.isNotBlank()) {
-                    Text("v${state.currentVersion}", color = Muted, fontSize = 9.sp)
+                    Text("v${state.currentVersion}", color = Muted, fontSize = 8.sp)
                 }
             }
 
-            Text(state.message, color = if (problem) Color(0xFFFFA2AB) else Color(0xFFB3BDC6), fontSize = 9.sp)
+            Text(
+                state.message,
+                color = if (problem) Color(0xFFFFA2AB) else Color(0xFFB3BDC6),
+                fontSize = 8.sp,
+                maxLines = if (compact) 2 else 3,
+                overflow = TextOverflow.Ellipsis
+            )
 
             if (state.stage == AppUpdateStage.DOWNLOADING) {
-                LinearProgressIndicator(progress = { state.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
+                LinearProgressIndicator(
+                    progress = { state.progress.coerceIn(0, 100) / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 OutlinedButton(onClick = onCheck, enabled = !active) {
-                    Text(if (active) "확인 중" else "다시 확인", fontSize = 9.sp)
+                    Text(if (active) "확인 중" else "다시 확인", fontSize = 8.sp)
                 }
                 when (state.stage) {
-                    AppUpdateStage.READY -> Button(onClick = onAction) { Text("설치", fontSize = 9.sp) }
-                    AppUpdateStage.SIGNATURE_MISMATCH -> Button(onClick = onAction) { Text("릴리즈 열기", fontSize = 9.sp) }
+                    AppUpdateStage.READY -> Button(onClick = onAction) { Text("설치", fontSize = 8.sp) }
+                    AppUpdateStage.SIGNATURE_MISMATCH -> Button(onClick = onAction) {
+                        Text("릴리즈 열기", fontSize = 8.sp)
+                    }
                     else -> Unit
                 }
             }
@@ -864,7 +978,7 @@ private fun UpdateCard(
 }
 
 @Composable
-private fun ReliableCameraLayer(
+private fun CameraLayer(
     ip: String,
     retryKey: Int,
     modifier: Modifier = Modifier
@@ -880,7 +994,11 @@ private fun ReliableCameraLayer(
         withContext(Dispatchers.IO) {
             var connection: HttpURLConnection? = null
             try {
-                val host = ip.removePrefix("http://").removePrefix("https://").substringBefore('/').substringBefore(':')
+                val host = ip
+                    .removePrefix("http://")
+                    .removePrefix("https://")
+                    .substringBefore('/')
+                    .substringBefore(':')
                 connection = URL("http://$host:81/stream").openConnection() as HttpURLConnection
                 connection.connectTimeout = 3000
                 connection.readTimeout = 5000
@@ -904,13 +1022,21 @@ private fun ReliableCameraLayer(
 
     Box(modifier.background(ScreenBg), contentAlignment = Alignment.Center) {
         latestBitmap?.let {
-            Image(it.asImageBitmap(), "ESP32 camera", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        } ?: Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            Icon(Icons.Default.Videocam, null, Modifier.size(34.dp), tint = Color(0xFF4D5964))
+            Image(
+                it.asImageBitmap(),
+                "ESP32 camera",
+                Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } ?: Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Icon(Icons.Default.Videocam, null, Modifier.size(32.dp), tint = Color(0xFF4D5964))
             Text(
                 if (ip.isBlank()) "Bluetooth connected · Camera off" else (error ?: "Connecting camera…"),
                 color = Color(0xFF73808B),
-                fontSize = 10.sp
+                fontSize = 9.sp
             )
         }
     }
@@ -923,7 +1049,3 @@ private fun BluetoothDevice.safeName(): String =
 @SuppressLint("MissingPermission")
 private fun BluetoothDevice.safeAddress(): String =
     runCatching { address }.getOrNull().orEmpty()
-
-private fun Activity.lifecycleScopeSafe(block: suspend () -> Unit) {
-    lifecycleScope.launch { block() }
-}
