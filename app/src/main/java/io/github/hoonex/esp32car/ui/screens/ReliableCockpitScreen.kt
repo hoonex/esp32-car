@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -76,6 +77,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.network.MjpegParser
 import io.github.hoonex.esp32car.update.AppUpdateStage
@@ -634,6 +636,7 @@ private fun SettingsOverlay(
     val fw by viewModel.firmwareUpdate.collectAsStateWithLifecycle()
     val wifiStatus by viewModel.wifiStatus.collectAsStateWithLifecycle()
     val wifiError by viewModel.wifiError.collectAsStateWithLifecycle()
+    val connectedDeviceName by viewModel.bluetooth.connectedDeviceName.collectAsStateWithLifecycle()
 
     var deadzone by remember { mutableFloatStateOf(viewModel.settings.controlDeadzone) }
     var ssid by remember { mutableStateOf("") }
@@ -667,7 +670,7 @@ private fun SettingsOverlay(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     item {
-                        SettingsSection("Bluetooth", "현재 연결: ${viewModel.bluetooth.connectedDeviceName.collectAsStateWithLifecycle().value ?: "ESP32_CAM_RC"}") {
+                        SettingsSection("Bluetooth", "현재 연결: ${connectedDeviceName ?: "ESP32_CAM_RC"}") {
                             OutlinedButton(onClick = viewModel::disconnectBluetooth, modifier = Modifier.fillMaxWidth()) {
                                 Icon(Icons.Default.Bluetooth, null)
                                 Spacer(Modifier.width(6.dp))
@@ -793,7 +796,7 @@ private fun SettingsOverlay(
 private fun SettingsSection(
     title: String,
     subtitle: String,
-    content: @Composable Column.() -> Unit
+    content: @Composable ColumnScope.() -> Unit
 ) {
     Surface(
         color = PanelSoft,
@@ -922,5 +925,5 @@ private fun BluetoothDevice.safeAddress(): String =
     runCatching { address }.getOrNull().orEmpty()
 
 private fun Activity.lifecycleScopeSafe(block: suspend () -> Unit) {
-    androidx.lifecycle.lifecycleScope.launch { block() }
+    lifecycleScope.launch { block() }
 }
