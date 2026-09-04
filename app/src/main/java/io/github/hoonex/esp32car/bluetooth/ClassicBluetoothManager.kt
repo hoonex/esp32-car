@@ -16,7 +16,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,10 +47,8 @@ class ClassicBluetoothManager(context: Context) {
     private var reader: BufferedReader? = null
     private var connectJob: Job? = null
     private var listenJob: Job? = null
-    private var rediscoveryJob: Job? = null
 
     private val discoveredByAddress = linkedMapOf<String, BluetoothDevice>()
-    private var preferredAutoConnectName: String? = null
     private var pendingBondAddress: String? = null
     private var receiverRegistered = false
 
@@ -106,7 +103,7 @@ class ClassicBluetoothManager(context: Context) {
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
                     _isDiscovering.value = false
                     if (_connectionState.value == ConnectionState.DISCONNECTED && discoveredByAddress.isEmpty()) {
-                        _lastError.value = "주변 Bluetooth 기기를 찾지 못했습니다. ESP32_CAM_RC가 휴대폰 Bluetooth 목록에 보이는지 확인한 뒤 다시 검색하세요."
+                        _lastError.value = "ESP32_CAM_RC를 찾지 못했습니다. 보드 전원이 켜져 있고 휴대폰 Bluetooth 목록에 보이는지 확인하세요."
                     }
                 }
 
@@ -114,22 +111,7 @@ class ClassicBluetoothManager(context: Context) {
                     val device = intent.bluetoothDeviceExtra() ?: return
                     val address = runCatching { device.address }.getOrNull() ?: return
                     discoveredByAddress[address] = device
-                    _discoveredDevices.value = discoveredByAddress.values.sortedWith(
-                        compareByDescending<BluetoothDevice> {
-                            runCatching { it.name }.getOrNull()?.equals(DEFAULT_DEVICE_NAME, true) == true
-                        }.thenBy { runCatching { it.name }.getOrNull().orEmpty() }
-                    )
-
-                    val name = runCatching { device.name }.getOrNull()
-                    val preferred = preferredAutoConnectName
-                    if (
-                        preferred != null &&
-                        name?.equals(preferred, ignoreCase = true) == true &&
-                        _connectionState.value == ConnectionState.DISCONNECTED
-                    ) {
-                        stopDiscovery()
-                        pairAndConnect(device)
-                    }
+                    publishDiscovered()
                 }
 
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
@@ -137,10 +119,11 @@ class ClassicBluetoothManager(context: Context) {
                     val address = runCatching { device.address }.getOrNull() ?: return
                     val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
                     val previous = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.BOND_NONE)
+
                     when (state) {
                         BluetoothDevice.BOND_BONDED -> {
                             discoveredByAddress[address] = device
-                            _discoveredDevices.value = discoveredByAddress.values.toList()
+                            publishDiscovered()
                             if (pendingBondAddress == address) {
                                 pendingBondAddress = null
                                 connectToDevice(device)
@@ -150,7 +133,7 @@ class ClassicBluetoothManager(context: Context) {
                         BluetoothDevice.BOND_NONE -> {
                             if (pendingBondAddress == address && previous == BluetoothDevice.BOND_BONDING) {
                                 pendingBondAddress = null
-                                _lastError.value = "Bluetooth 페어링이 취소되었거나 실패했습니다. 다시 Pair & Connect를 눌러보세요."
+                                _lastError.value = "Bluetooth 페어링이 취소되었거나 실패했습니다."
                             }
                         }
                     }
@@ -164,54 +147,32 @@ class ClassicBluetoothManager(context: Context) {
     }
 
     fun isBluetoothAvailable(): Boolean = bluetoothAdapter != null
-    fun isBluetoothEnabled(): Boolean = runCatching { bluetoothAdapter?.isEnabled == true }.getOrDefault(false)
+
+    fun isBluetoothEnabled(): Boolean =
+        runCatching { bluetoothAdapter?.isEnabled == true }.getOrDefault(false)
 
     fun getPairedDevices(): List<BluetoothDevice> = runCatching {
         bluetoothAdapter?.bondedDevices
-            ?.sortedWith(compareByDescending<BluetoothDevice> {
-                runCatching { it.name }.getOrNull()?.equals(DEFAULT_DEVICE_NAME, true) == true
-            }.thenBy { runCatching { it.name }.getOrNull().orEmpty() })
+            ?.sortedWith(
+                compareByDescending<BluetoothDevice> {
+                    runCatching { it.name }.getOrNull()?.equals(DEFAULT_DEVICE_NAME, true) == true
+                }.thenBy { runCatching { it.name }.getOrNull().orEmpty() }
+            )
             ?: emptyList()
     }.getOrDefault(emptyList())
 
     fun lastDeviceAddress(): String? = prefs.getString(PREF_LAST_ADDRESS, null)
 
+    /**
+     * Kept for API compatibility with older callers. Connection is intentionally manual now:
+     * this only opens discovery and never pairs/connects a device by itself.
+     */
     fun connectPreferredOrDiscover(preferredName: String = DEFAULT_DEVICE_NAME) {
-        preferredAutoConnectName = preferredName
-        _lastError.value = null
-
-        if (!isBluetoothAvailable()) {
-            _lastError.value = "이 기기는 Bluetooth를 지원하지 않습니다."
-            return
-        }
-        if (!isBluetoothEnabled()) {
-            _lastError.value = "휴대폰 Bluetooth가 꺼져 있습니다. Bluetooth를 켠 뒤 다시 연결하세요."
-            return
-        }
-        if (_connectionState.value != ConnectionState.DISCONNECTED) return
-
-        val paired = getPairedDevices()
-        val exact = paired.firstOrNull { runCatching { it.name }.getOrNull()?.equals(preferredName, true) == true }
-        if (exact != null) {
-            connectToDevice(exact)
-            return
-        }
-
-        val lastAddress = lastDeviceAddress()
-        val last = paired.firstOrNull { runCatching { it.address }.getOrNull() == lastAddress }
-        if (last != null) {
-            connectToDevice(last)
-            return
-        }
-
         startDiscovery(preferredName)
     }
 
-    fun startDiscovery(preferredName: String? = preferredAutoConnectName) {
-        preferredAutoConnectName = preferredName
-        rediscoveryJob?.cancel()
-        rediscoveryJob = null
-
+    /** Starts discovery only. A discovered device must be tapped by the user to pair/connect. */
+    fun startDiscovery(preferredName: String? = null) {
         if (!isBluetoothAvailable()) {
             _lastError.value = "이 기기는 Bluetooth를 지원하지 않습니다."
             return
@@ -231,7 +192,7 @@ class ClassicBluetoothManager(context: Context) {
             val started = bluetoothAdapter?.startDiscovery() == true
             _isDiscovering.value = started
             if (!started) {
-                _lastError.value = "Bluetooth 검색을 시작하지 못했습니다. Nearby devices 권한을 확인하고 다시 시도하세요."
+                _lastError.value = "Bluetooth 검색을 시작하지 못했습니다. Nearby devices 권한을 확인하세요."
             }
         }.onFailure {
             _isDiscovering.value = false
@@ -246,6 +207,8 @@ class ClassicBluetoothManager(context: Context) {
 
     fun pairAndConnect(device: BluetoothDevice) {
         stopDiscovery()
+        _lastError.value = null
+
         val address = runCatching { device.address }.getOrElse {
             _lastError.value = "Bluetooth 기기 주소를 읽지 못했습니다."
             return
@@ -255,13 +218,14 @@ class ClassicBluetoothManager(context: Context) {
             BluetoothDevice.BOND_BONDED -> connectToDevice(device)
             BluetoothDevice.BOND_BONDING -> {
                 pendingBondAddress = address
-                _lastError.value = "Bluetooth 페어링 승인 대기 중입니다."
+                _lastError.value = "휴대폰의 Bluetooth 페어링 요청을 승인하세요."
             }
             else -> {
                 pendingBondAddress = address
                 val started = runCatching { device.createBond() }.getOrDefault(false)
                 if (!started) {
                     pendingBondAddress = null
+                    // Some ESP32 SPP implementations trigger pairing from RFCOMM itself.
                     connectToDevice(device)
                 }
             }
@@ -286,8 +250,6 @@ class ClassicBluetoothManager(context: Context) {
         }
         val name = runCatching { device.name }.getOrNull() ?: address
 
-        rediscoveryJob?.cancel()
-        rediscoveryJob = null
         stopDiscovery()
         connectJob?.cancel()
         connectJob = null
@@ -309,7 +271,6 @@ class ClassicBluetoothManager(context: Context) {
                 reader = BufferedReader(InputStreamReader(newSocket.inputStream, Charsets.UTF_8))
 
                 prefs.edit().putString(PREF_LAST_ADDRESS, address).apply()
-                preferredAutoConnectName = runCatching { device.name }.getOrNull() ?: preferredAutoConnectName
                 _connectionState.value = ConnectionState.CONNECTED
                 _lastError.value = null
                 startListening()
@@ -318,7 +279,8 @@ class ClassicBluetoothManager(context: Context) {
                 val reason = t.message?.takeIf { it.isNotBlank() } ?: t.javaClass.simpleName
                 markDisconnected(clearIdentity = false)
                 _lastError.value = "Bluetooth 연결 실패: $reason"
-                scheduleRediscovery()
+            } finally {
+                connectJob = null
             }
         }
     }
@@ -362,20 +324,8 @@ class ClassicBluetoothManager(context: Context) {
             } finally {
                 if (_connectionState.value == ConnectionState.CONNECTED || lostLink) {
                     markDisconnected(clearIdentity = false)
-                    if (lostLink) scheduleRediscovery()
                 }
-            }
-        }
-    }
-
-    private fun scheduleRediscovery() {
-        val fallback = preferredAutoConnectName ?: DEFAULT_DEVICE_NAME
-        rediscoveryJob?.cancel()
-        rediscoveryJob = scope.launch {
-            delay(500)
-            rediscoveryJob = null
-            if (_connectionState.value == ConnectionState.DISCONNECTED && isBluetoothEnabled()) {
-                startDiscovery(fallback)
+                listenJob = null
             }
         }
     }
@@ -420,6 +370,7 @@ class ClassicBluetoothManager(context: Context) {
     fun sendCommand(command: String) {
         if (_connectionState.value != ConnectionState.CONNECTED) return
         val normalized = command.trimEnd('\r', '\n')
+
         scope.launch {
             try {
                 writeMutex.withLock {
@@ -429,8 +380,7 @@ class ClassicBluetoothManager(context: Context) {
                 }
             } catch (t: Throwable) {
                 _lastError.value = "Bluetooth 전송 실패: ${t.message ?: t.javaClass.simpleName}"
-                disconnect(clearIdentity = false)
-                scheduleRediscovery()
+                markDisconnected(clearIdentity = false)
             }
         }
     }
@@ -440,8 +390,8 @@ class ClassicBluetoothManager(context: Context) {
     }
 
     fun disconnect(clearIdentity: Boolean = true) {
-        rediscoveryJob?.cancel()
-        rediscoveryJob = null
+        stopDiscovery()
+        pendingBondAddress = null
         connectJob?.cancel()
         connectJob = null
         listenJob?.cancel()
@@ -467,6 +417,14 @@ class ClassicBluetoothManager(context: Context) {
         socket = null
     }
 
+    private fun publishDiscovered() {
+        _discoveredDevices.value = discoveredByAddress.values.sortedWith(
+            compareByDescending<BluetoothDevice> {
+                runCatching { it.name }.getOrNull()?.equals(DEFAULT_DEVICE_NAME, true) == true
+            }.thenBy { runCatching { it.name }.getOrNull().orEmpty() }
+        )
+    }
+
     private fun registerDiscoveryReceiver() {
         if (receiverRegistered) return
         val filter = IntentFilter().apply {
@@ -475,6 +433,7 @@ class ClassicBluetoothManager(context: Context) {
             addAction(BluetoothDevice.ACTION_FOUND)
             addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         }
+
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 appContext.registerReceiver(discoveryReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -498,7 +457,6 @@ class ClassicBluetoothManager(context: Context) {
     }
 
     fun close() {
-        stopDiscovery()
         disconnect()
         if (receiverRegistered) {
             runCatching { appContext.unregisterReceiver(discoveryReceiver) }

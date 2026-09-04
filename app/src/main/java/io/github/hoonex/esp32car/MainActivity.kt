@@ -24,7 +24,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,17 +53,14 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
+        // App updates are checked automatically, but Bluetooth connection is always user initiated.
         lifecycleScope.launch {
             AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
         }
 
         setContent {
             MyApplicationTheme {
-                BluetoothPermissionGate(
-                    onPermissionsReady = {
-                        rcViewModel.bluetooth.connectPreferredOrDiscover("ESP32_CAM_RC")
-                    }
-                ) {
+                BluetoothPermissionGate {
                     ReliableCockpitScreen(rcViewModel)
                 }
             }
@@ -73,10 +69,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        hideSystemBars()
         AppUpdater.resumePendingInstall(this)
-        if (hasBluetoothRuntimePermissions()) {
-            rcViewModel.bluetooth.connectPreferredOrDiscover("ESP32_CAM_RC")
-        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -89,17 +83,6 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
-    private fun hasBluetoothRuntimePermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-    }
-
     private fun hideSystemBars() {
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
@@ -109,12 +92,8 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun BluetoothPermissionGate(
-    onPermissionsReady: () -> Unit,
-    content: @Composable () -> Unit
-) {
+private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val latestOnReady = rememberUpdatedState(onPermissionsReady)
 
     fun requiredPermissions(): Array<String> = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
@@ -134,32 +113,30 @@ private fun BluetoothPermissionGate(
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
+    ) {
         requestedOnce = true
-        granted = requiredPermissions().all { permission -> result[permission] == true || ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED }
-        if (granted) latestOnReady.value()
+        granted = allGranted()
     }
 
     LaunchedEffect(Unit) {
         granted = allGranted()
-        if (granted) latestOnReady.value()
-        else launcher.launch(requiredPermissions())
+        if (!granted) launcher.launch(requiredPermissions())
     }
 
-    Box(Modifier.fillMaxSize()) {
-        if (granted) {
-            content()
-        } else {
+    if (granted) {
+        content()
+    } else {
+        Box(Modifier.fillMaxSize().background(Color(0xFF070A0E))) {
             Column(
-                modifier = Modifier.fillMaxSize().background(Color(0xFF05070A)).padding(28.dp),
+                modifier = Modifier.align(Alignment.Center).padding(28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("BLUETOOTH PERMISSION REQUIRED", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
+                Text("BLUETOOTH PERMISSION", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
                 Text(
-                    if (requestedOnce) "Nearby devices 권한이 거부되어 ESP32_CAM_RC를 검색하거나 연결할 수 없습니다." else "ESP32_CAM_RC 검색과 연결을 위해 Nearby devices 권한이 필요합니다.",
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    color = Color(0xFF9BA7B2),
+                    if (requestedOnce) "Nearby devices 권한이 꺼져 있어 ESP32_CAM_RC를 검색할 수 없습니다."
+                    else "ESP32_CAM_RC를 직접 검색하고 연결하려면 Nearby devices 권한이 필요합니다.",
+                    color = Color(0xFF9AA5AF),
                     fontSize = 12.sp
                 )
                 Button(onClick = { launcher.launch(requiredPermissions()) }) {
