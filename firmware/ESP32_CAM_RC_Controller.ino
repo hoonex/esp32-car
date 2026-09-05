@@ -222,6 +222,21 @@ void motorsBackward(int speed, int trim) {
 void motorsLeft(int speed) { motorsSet(-speed, speed); }
 void motorsRight(int speed) { motorsSet(speed, -speed); }
 
+bool controlAuthorized(httpd_req_t* req) {
+  size_t len = httpd_req_get_hdr_value_len(req, "X-ESP32-Control-Key");
+  if (len == 0 || len > 64) return false;
+  char value[65];
+  if (httpd_req_get_hdr_value_str(req, "X-ESP32-Control-Key", value, sizeof(value)) != ESP_OK) return false;
+  return otaKey == String(value);
+}
+
+esp_err_t sendUnauthorized(httpd_req_t* req) {
+  httpd_resp_set_status(req, "401 Unauthorized");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+}
+
 // ===== Camera =====
 void ensureCamera() {
   if (cameraStarted) return;
@@ -278,9 +293,11 @@ static const char* STREAM_BOUNDARY = "\r\n--frame\r\n";
 static const char* STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 static esp_err_t streamHandler(httpd_req_t* req) {
+  if (!controlAuthorized(req)) return sendUnauthorized(req);
   if (!cameraStarted) return ESP_FAIL;
   esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
   while (true) {
     uint32_t frameStartedAt = millis();
@@ -307,6 +324,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 }
 
 static esp_err_t captureHandler(httpd_req_t* req) {
+  if (!controlAuthorized(req)) return sendUnauthorized(req);
   if (!cameraStarted) return httpd_resp_send_500(req);
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return httpd_resp_send_500(req);
@@ -353,20 +371,8 @@ String statusJson(bool includeKey) {
   return json;
 }
 
-bool controlAuthorized(httpd_req_t* req) {
-  size_t len = httpd_req_get_hdr_value_len(req, "X-ESP32-Control-Key");
-  if (len == 0 || len > 64) return false;
-  char value[65];
-  if (httpd_req_get_hdr_value_str(req, "X-ESP32-Control-Key", value, sizeof(value)) != ESP_OK) return false;
-  return otaKey == String(value);
-}
-
 static esp_err_t actionHandler(httpd_req_t* req) {
-  if (!controlAuthorized(req)) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
-  }
+  if (!controlAuthorized(req)) return sendUnauthorized(req);
 
   size_t queryLen = httpd_req_get_url_query_len(req) + 1;
   if (queryLen <= 1) {
@@ -476,14 +482,17 @@ bool otaAuthorized(httpd_req_t* req) {
 }
 
 static esp_err_t otaInfoHandler(httpd_req_t* req) {
+  if (!controlAuthorized(req)) return sendUnauthorized(req);
   String json = statusJson(false);
   httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   return httpd_resp_send(req, json.c_str(), json.length());
 }
 
 static esp_err_t otaUploadHandler(httpd_req_t* req) {
   if (!otaAuthorized(req)) {
     httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
   }
   if (req->content_len <= 0) {
@@ -525,12 +534,12 @@ static esp_err_t otaUploadHandler(httpd_req_t* req) {
 static esp_err_t indexHandler(httpd_req_t* req) {
   const char* page =
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>body{background:#080b10;color:#fff;font-family:sans-serif;margin:24px}img{max-width:100%}</style></head>"
-    "<body><h2>ESP32 Car 3.3</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p><img src='http://";
-  String host = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-  String html = String(page) + host + ":81/stream'><p>Use the Android app for controls.</p></body></html>";
+    "<style>body{background:#080b10;color:#fff;font-family:sans-serif;margin:24px}</style></head>"
+    "<body><h2>ESP32 Car 3.3</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p>"
+    "<p>Control, camera and diagnostics require the per-device key delivered over Bluetooth. Use the Android app.</p></body></html>";
   httpd_resp_set_type(req, "text/html");
-  return httpd_resp_send(req, html.c_str(), html.length());
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_sendstr(req, page);
 }
 
 void startServers() {
