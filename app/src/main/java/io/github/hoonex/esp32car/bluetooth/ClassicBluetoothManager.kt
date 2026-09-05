@@ -34,7 +34,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 
-enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
+enum class ConnectionState { DISCONNECTED, CONNECTING, LEGACY_UPGRADE, CONNECTED }
 
 @SuppressLint("MissingPermission")
 class ClassicBluetoothManager(context: Context) {
@@ -77,6 +77,9 @@ class ClassicBluetoothManager(context: Context) {
 
     private val _linkVerified = MutableStateFlow(false)
     val linkVerified: StateFlow<Boolean> = _linkVerified.asStateFlow()
+
+    private val _legacyUpgradeAvailable = MutableStateFlow(false)
+    val legacyUpgradeAvailable: StateFlow<Boolean> = _legacyUpgradeAvailable.asStateFlow()
 
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
@@ -272,6 +275,7 @@ class ClassicBluetoothManager(context: Context) {
 
         _connectionState.value = ConnectionState.CONNECTING
         _linkVerified.value = false
+        _legacyUpgradeAvailable.value = false
         _lastError.value = null
         _connectedDeviceName.value = name
         _connectedDeviceAddress.value = address
@@ -298,7 +302,7 @@ class ClassicBluetoothManager(context: Context) {
                 handshakeJob?.cancel()
                 handshakeJob = scope.launch {
                     delay(HANDSHAKE_TIMEOUT_MS)
-                    if (generation.get() == myGeneration && !_linkVerified.value) {
+                    if (generation.get() == myGeneration && !_linkVerified.value && !_legacyUpgradeAvailable.value) {
                         _lastError.value = "ESP32 응답 확인 실패: 연결은 열렸지만 STATUS handshake가 오지 않았습니다."
                         disconnectGeneration(myGeneration, clearIdentity = false)
                     }
@@ -384,14 +388,30 @@ class ClassicBluetoothManager(context: Context) {
             val profile = json.optString("profile")
             val board = json.optString("board")
             val protocol = json.optInt("protocol", -1)
+            val firmware = json.optString("fw")
+            val legacyKey = json.optString("ota_key")
             if (profile != EXPECTED_PROFILE) {
                 _lastError.value = "호환되지 않는 SPP 기기입니다: ${profile.ifBlank { board.ifBlank { "STATUS profile 없음" } }}"
                 disconnectGeneration(myGeneration, clearIdentity = false)
                 return
             }
+
             if (protocol != EXPECTED_PROTOCOL) {
-                _lastError.value = "펌웨어 protocol 불일치: P$protocol · 필요한 버전 P$EXPECTED_PROTOCOL (FW 3.3.0을 설치하세요)."
-                disconnectGeneration(myGeneration, clearIdentity = false)
+                val legacyOtaCapable = firmware.startsWith("3.2.") && json.optBoolean("ota", false) && legacyKey.isNotBlank()
+                if (!legacyOtaCapable) {
+                    _lastError.value = "펌웨어 protocol 불일치: P$protocol · 필요한 버전 P$EXPECTED_PROTOCOL (FW 3.3.0 필요)."
+                    disconnectGeneration(myGeneration, clearIdentity = false)
+                    return
+                }
+
+                _btStatusResponse.value = json
+                json.optString("ssid").takeIf { it.isNotBlank() }?.let { _wifiProvisionedSsid.value = it }
+                json.optString("ip").takeIf { it.isNotBlank() && it != "0.0.0.0" }?.let { _wifiConnectedIp.value = it }
+                _legacyUpgradeAvailable.value = true
+                _connectionState.value = ConnectionState.LEGACY_UPGRADE
+                _lastError.value = null
+                handshakeJob?.cancel()
+                handshakeJob = null
                 return
             }
 
@@ -401,6 +421,7 @@ class ClassicBluetoothManager(context: Context) {
             _connectedDeviceAddress.value?.takeIf { it.isNotBlank() }?.let { verifiedAddress ->
                 prefs.edit().putString(PREF_LAST_ADDRESS, verifiedAddress).apply()
             }
+            _legacyUpgradeAvailable.value = false
             _linkVerified.value = true
             _connectionState.value = ConnectionState.CONNECTED
             handshakeJob?.cancel()
@@ -449,6 +470,14 @@ class ClassicBluetoothManager(context: Context) {
         }
     }
 
+    /** Only the minimal non-driving commands needed to migrate known firmware 3.2.x are allowed. */
+    fun sendLegacyUpgradeCommand(command: String) {
+        if (_connectionState.value != ConnectionState.LEGACY_UPGRADE || !_legacyUpgradeAvailable.value) return
+        val normalized = command.trimEnd('\r', '\n')
+        if (normalized != "U" && normalized != "STATUS") return
+        enqueueControl(normalized, generation.get())
+    }
+
     private fun enqueueControl(command: String, myGeneration: Long) {
         controlCommands.trySend(PendingCommand(myGeneration, command.trimEnd('\r', '\n')))
     }
@@ -485,6 +514,7 @@ class ClassicBluetoothManager(context: Context) {
         cancelConnectionJobsAndSockets()
         _connectionState.value = ConnectionState.DISCONNECTED
         _linkVerified.value = false
+        _legacyUpgradeAvailable.value = false
         if (clearIdentity) {
             _connectedDeviceName.value = null
             _connectedDeviceAddress.value = null
@@ -497,6 +527,7 @@ class ClassicBluetoothManager(context: Context) {
         cancelConnectionJobsAndSockets()
         _connectionState.value = ConnectionState.DISCONNECTED
         _linkVerified.value = false
+        _legacyUpgradeAvailable.value = false
         if (clearIdentity) {
             _connectedDeviceName.value = null
             _connectedDeviceAddress.value = null
