@@ -108,6 +108,7 @@ class ClassicBluetoothManager(context: Context) {
         private const val PREF_LAST_ADDRESS = "last_device_address"
         private const val DEFAULT_DEVICE_NAME = "ESP32_CAM_RC"
         private const val EXPECTED_PROFILE = "AI_THINKER_ESP32_CAM_2WD_L298N"
+        private const val EXPECTED_PROTOCOL = 2
         private const val HANDSHAKE_TIMEOUT_MS = 3500L
     }
 
@@ -291,7 +292,6 @@ class ClassicBluetoothManager(context: Context) {
                 reader = newReader
                 connectingSocket = null
 
-                prefs.edit().putString(PREF_LAST_ADDRESS, address).apply()
                 startListening(myGeneration, newSocket, newReader)
                 enqueueControl("STATUS", myGeneration)
 
@@ -383,8 +383,14 @@ class ClassicBluetoothManager(context: Context) {
             val json = runCatching { JSONObject(line) }.getOrNull() ?: return
             val profile = json.optString("profile")
             val board = json.optString("board")
+            val protocol = json.optInt("protocol", -1)
             if (profile != EXPECTED_PROFILE) {
                 _lastError.value = "호환되지 않는 SPP 기기입니다: ${profile.ifBlank { board.ifBlank { "STATUS profile 없음" } }}"
+                disconnectGeneration(myGeneration, clearIdentity = false)
+                return
+            }
+            if (protocol != EXPECTED_PROTOCOL) {
+                _lastError.value = "펌웨어 protocol 불일치: P$protocol · 필요한 버전 P$EXPECTED_PROTOCOL (FW 3.3.0을 설치하세요)."
                 disconnectGeneration(myGeneration, clearIdentity = false)
                 return
             }
@@ -392,6 +398,9 @@ class ClassicBluetoothManager(context: Context) {
             _btStatusResponse.value = json
             json.optString("ssid").takeIf { it.isNotBlank() }?.let { _wifiProvisionedSsid.value = it }
             json.optString("ip").takeIf { it.isNotBlank() }?.let { _wifiConnectedIp.value = it }
+            _connectedDeviceAddress.value?.takeIf { it.isNotBlank() }?.let { verifiedAddress ->
+                prefs.edit().putString(PREF_LAST_ADDRESS, verifiedAddress).apply()
+            }
             _linkVerified.value = true
             _connectionState.value = ConnectionState.CONNECTED
             handshakeJob?.cancel()
