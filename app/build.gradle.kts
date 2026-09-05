@@ -22,12 +22,9 @@ android {
         applicationId = "io.github.hoonex.esp32car"
         minSdk = 24
         targetSdk = 36
-        versionCode = 9
-        versionName = "3.2.0"
+        versionCode = 10
+        versionName = "3.2.1"
 
-        // Current target hardware is modern Galaxy/Android phones and tablets.
-        // OpenCV ships large native libraries for several ABIs; arm64-v8a keeps the
-        // install smaller while retaining the experimental on-phone vision path.
         ndk {
             abiFilters += "arm64-v8a"
         }
