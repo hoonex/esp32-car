@@ -95,7 +95,10 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     rcClient.controlKey = key
                 }
                 status.optString("fw").takeIf { it.isNotBlank() }?.let { settings.lastFirmwareVersion = it }
-                status.optString("ip").takeIf { it.isNotBlank() && it != "0.0.0.0" }?.let { settings.ipAddress = it }
+
+                val reportedIp = status.optString("ip").trim()
+                settings.ipAddress = reportedIp.takeIf { it.isNotBlank() && it != "0.0.0.0" }.orEmpty()
+
                 if (status.has("motor_swap")) settings.swapMotors = status.optBoolean("motor_swap")
                 if (status.has("invert_left")) settings.invertLeftMotor = status.optBoolean("invert_left")
                 if (status.has("invert_right")) settings.invertRightMotor = status.optBoolean("invert_right")
@@ -405,9 +408,8 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         bluetooth.sendCommand(RcProtocol.speed(settings.speed))
         bluetooth.sendCommand(RcProtocol.trim(settings.trim))
         bluetooth.sendCommand(RcProtocol.light(settings.light))
-        bluetooth.sendCommand(
-            RcProtocol.motorConfig(settings.swapMotors, settings.invertLeftMotor, settings.invertRightMotor)
-        )
+        // Motor swap/inversion are device calibration. Never overwrite them automatically on connect.
+        // STATUS imports the device's actual values; changes are sent only by applyMotorConfig().
     }
 
     private data class BundledFirmware(val bytes: ByteArray, val version: String, val sha256: String)
