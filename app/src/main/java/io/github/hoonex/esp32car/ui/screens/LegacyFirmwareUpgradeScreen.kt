@@ -1,6 +1,9 @@
 package io.github.hoonex.esp32car.ui.screens
 
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -28,8 +31,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -50,18 +58,34 @@ private val LegacyGood = Color(0xFF66E7B1)
 private val LegacyMuted = Color(0xFF98A3AE)
 private val LegacyDanger = Color(0xFFFF6677)
 
+private const val RecoveryIp = "192.168.4.1"
+
 @Composable
 fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val status by viewModel.bluetooth.btStatusResponse.collectAsStateWithLifecycle()
+    val recoveryIp by viewModel.bluetooth.wifiConnectedIp.collectAsStateWithLifecycle()
     val wifiStatus by viewModel.wifiStatus.collectAsStateWithLifecycle()
     val wifiError by viewModel.wifiError.collectAsStateWithLifecycle()
     val update by viewModel.firmwareUpdate.collectAsStateWithLifecycle()
     val connectedName by viewModel.bluetooth.connectedDeviceName.collectAsStateWithLifecycle()
+    var probeInFlight by remember { mutableStateOf(false) }
+    var routeError by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose { unbindProcessNetwork(context) }
+    }
+
+    LaunchedEffect(wifiStatus, wifiError) {
+        if (probeInFlight && (wifiStatus != null || wifiError != null)) {
+            probeInFlight = false
+        }
+    }
 
     val legacyVersion = status?.optString("fw").orEmpty().ifBlank { "3.2.x" }
     val keyReady = status?.optString("ota_key").orEmpty().isNotBlank() || viewModel.settings.otaKey.isNotBlank()
+    val recoveryApRequested = recoveryIp == RecoveryIp
     val recoveryReachable = wifiStatus?.optString("fw").orEmpty().startsWith("3.2.")
     val updateBusy = update.stage == FirmwareUpdateUiState.Stage.PREPARING ||
         update.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
@@ -129,13 +153,16 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                     Text("USB 없이 v3.3.0 설치", color = Color.White, fontSize = if (compact) 16.sp else 21.sp, fontWeight = FontWeight.Black)
                     Text("한 번만 복구 Wi-Fi에 연결하면 APK 안에 포함된 최신 펌웨어를 ESP32가 직접 받아 설치합니다.", color = LegacyMuted, fontSize = 9.sp)
 
-                    StepCard("1", "업데이트 Wi-Fi 열기", "ESP32-CAR-UPDATE / 비밀번호 esp32car", keyReady) {
+                    StepCard("1", "업데이트 Wi-Fi 열기", "ESP32-CAR-UPDATE / 비밀번호 esp32car", recoveryApRequested) {
                         Button(
                             onClick = {
-                                viewModel.updateIp("192.168.4.1")
+                                routeError = null
+                                probeInFlight = false
+                                unbindProcessNetwork(context)
+                                viewModel.updateIp(RecoveryIp)
                                 viewModel.bluetooth.sendLegacyUpgradeCommand("U")
                                 scope.launch {
-                                    delay(650)
+                                    delay(900)
                                     runCatching { context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
                                 }
                             },
@@ -151,22 +178,33 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                     StepCard(
                         "2",
                         "ESP32-CAR-UPDATE 연결 확인",
-                        if (recoveryReachable) "FW v${wifiStatus?.optString("fw")} 응답 확인됨" else "Wi-Fi 연결 후 앱으로 돌아와 확인",
+                        when {
+                            recoveryReachable -> "FW v${wifiStatus?.optString("fw")} 응답 확인됨"
+                            probeInFlight -> "192.168.4.1 OTA 상태 확인 중"
+                            else -> "Wi-Fi 연결 후 앱으로 돌아와 확인"
+                        },
                         recoveryReachable
                     ) {
                         OutlinedButton(
                             onClick = {
-                                viewModel.updateIp("192.168.4.1")
+                                routeError = null
+                                viewModel.updateIp(RecoveryIp)
+                                if (!bindToEsp32RecoveryNetwork(context)) {
+                                    probeInFlight = false
+                                    routeError = "ESP32-CAR-UPDATE Wi-Fi 경로를 찾지 못했습니다. Wi-Fi 설정에서 해당 AP에 연결한 뒤 다시 눌러주세요."
+                                    return@OutlinedButton
+                                }
+                                probeInFlight = true
                                 viewModel.refreshWifiStatus()
                             },
-                            enabled = !updateBusy,
+                            enabled = !updateBusy && !probeInFlight,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Default.CheckCircle, null)
                             Spacer(Modifier.width(7.dp))
-                            Text("연결 확인", fontSize = 10.sp)
+                            Text(if (probeInFlight) "확인 중..." else "연결 확인", fontSize = 10.sp)
                         }
-                        wifiError?.let { Text(it, color = LegacyDanger, fontSize = 8.sp) }
+                        (routeError ?: wifiError)?.let { Text(it, color = LegacyDanger, fontSize = 8.sp) }
                     }
 
                     StepCard(
@@ -192,7 +230,14 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                         }
 
                         Button(
-                            onClick = viewModel::updateFirmwareFromBundled,
+                            onClick = {
+                                routeError = null
+                                if (!bindToEsp32RecoveryNetwork(context)) {
+                                    routeError = "복구 Wi-Fi 연결이 끊겼습니다. ESP32-CAR-UPDATE에 다시 연결한 뒤 설치하세요."
+                                    return@Button
+                                }
+                                viewModel.updateFirmwareFromBundled()
+                            },
                             enabled = recoveryReachable && keyReady && !updateBusy && update.stage != FirmwareUpdateUiState.Stage.SUCCESS,
                             colors = ButtonDefaults.buttonColors(containerColor = LegacyGood, contentColor = Color(0xFF062218)),
                             modifier = Modifier.fillMaxWidth()
@@ -206,6 +251,29 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
             }
         }
     }
+}
+
+private fun bindToEsp32RecoveryNetwork(context: Context): Boolean {
+    val manager = context.getSystemService(ConnectivityManager::class.java) ?: return false
+    val recoveryNetwork = manager.allNetworks.firstOrNull { network ->
+        val capabilities = manager.getNetworkCapabilities(network)
+        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) {
+            return@firstOrNull false
+        }
+        val onRecoverySubnet = manager.getLinkProperties(network)
+            ?.linkAddresses
+            ?.any { address ->
+                address.address.hostAddress?.startsWith("192.168.4.") == true
+            } == true
+        onRecoverySubnet
+    } ?: return false
+
+    return runCatching { manager.bindProcessToNetwork(recoveryNetwork) }.getOrDefault(false)
+}
+
+private fun unbindProcessNetwork(context: Context) {
+    val manager = context.getSystemService(ConnectivityManager::class.java) ?: return
+    runCatching { manager.bindProcessToNetwork(null) }
 }
 
 @Composable
