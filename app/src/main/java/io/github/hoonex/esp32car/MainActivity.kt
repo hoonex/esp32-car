@@ -38,7 +38,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.ui.screens.LegacyFirmwareUpgradeScreen
 import io.github.hoonex.esp32car.ui.screens.ReliableCockpitScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
@@ -63,8 +62,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 BluetoothPermissionGate {
-                    val btState by rcViewModel.bluetooth.connectionState.collectAsStateWithLifecycle()
-                    if (btState == ConnectionState.LEGACY_UPGRADE) {
+                    val legacyUpgradeAvailable by rcViewModel.bluetooth.legacyUpgradeAvailable.collectAsStateWithLifecycle()
+                    if (legacyUpgradeAvailable) {
                         LegacyFirmwareUpgradeScreen(rcViewModel)
                     } else {
                         ReliableCockpitScreen(rcViewModel)
