@@ -30,6 +30,12 @@ class RCClient {
         .retryOnConnectionFailure(false)
         .build()
 
+    private val statusClient = client.newBuilder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .writeTimeout(3, TimeUnit.SECONDS)
+        .build()
+
     private val otaClient = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
@@ -40,6 +46,7 @@ class RCClient {
     private val driveCall = AtomicReference<Call?>(null)
     private val lightCall = AtomicReference<Call?>(null)
     private val configCall = AtomicReference<Call?>(null)
+    private val statusCall = AtomicReference<Call?>(null)
     private val otaCall = AtomicReference<Call?>(null)
 
     @Volatile var motorTrim: Int = 0
@@ -113,25 +120,68 @@ class RCClient {
     }
 
     fun requestStatus(ip: String, callback: (Result<JSONObject>) -> Unit) {
-        buildUrl(ip, "action") { addQueryParameter("go", "STATUS") }?.let { url ->
-            val call = client.newCall(authenticatedBuilder(url).build())
+        val urls = listOfNotNull(
+            buildUrl(ip, "api", "info"),
+            buildUrl(ip, "action") { addQueryParameter("go", "STATUS") }
+        )
+        if (urls.isEmpty()) {
+            callback(Result.failure(IllegalArgumentException("Invalid ESP32 IP address")))
+            return
+        }
+
+        fun attempt(index: Int, previousError: Throwable? = null) {
+            if (index >= urls.size) {
+                callback(Result.failure(previousError ?: IOException("ESP32 status request failed")))
+                return
+            }
+
+            val url = urls[index]
+            val call = statusClient.newCall(authenticatedBuilder(url).build())
+            statusCall.getAndSet(call)?.cancel()
             call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) = callback(Result.failure(e))
+                override fun onFailure(call: Call, e: IOException) {
+                    if (call.isCanceled()) return
+                    if (index + 1 < urls.size) {
+                        attempt(index + 1, e)
+                    } else {
+                        statusCall.compareAndSet(call, null)
+                        callback(Result.failure(e))
+                    }
+                }
 
                 override fun onResponse(call: Call, response: Response) {
                     response.use {
                         if (!it.isSuccessful) {
-                            callback(Result.failure(IOException("HTTP ${it.code}")))
+                            val error = IOException("HTTP ${it.code} from ${url.encodedPath}")
+                            if (index + 1 < urls.size) {
+                                attempt(index + 1, error)
+                            } else {
+                                statusCall.compareAndSet(call, null)
+                                callback(Result.failure(error))
+                            }
                             return
                         }
+
                         val body = it.body?.string().orEmpty()
                         runCatching { JSONObject(body) }
-                            .onSuccess { json -> callback(Result.success(json)) }
-                            .onFailure { error -> callback(Result.failure(error)) }
+                            .onSuccess { json ->
+                                statusCall.compareAndSet(call, null)
+                                callback(Result.success(json))
+                            }
+                            .onFailure { error ->
+                                if (index + 1 < urls.size) {
+                                    attempt(index + 1, error)
+                                } else {
+                                    statusCall.compareAndSet(call, null)
+                                    callback(Result.failure(error))
+                                }
+                            }
                     }
                 }
             })
-        } ?: callback(Result.failure(IllegalArgumentException("Invalid ESP32 IP address")))
+        }
+
+        attempt(0)
     }
 
     fun uploadFirmware(
@@ -202,9 +252,11 @@ class RCClient {
         driveCall.getAndSet(null)?.cancel()
         lightCall.getAndSet(null)?.cancel()
         configCall.getAndSet(null)?.cancel()
+        statusCall.getAndSet(null)?.cancel()
         otaCall.getAndSet(null)?.cancel()
         dispatcher.cancelAll()
         client.connectionPool.evictAll()
+        statusClient.connectionPool.evictAll()
         otaClient.dispatcher.cancelAll()
         otaClient.connectionPool.evictAll()
     }
