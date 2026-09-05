@@ -260,10 +260,12 @@ private fun bindToEsp32RecoveryNetwork(context: Context): Boolean {
         if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) {
             return@firstOrNull false
         }
-        manager.getLinkProperties(network)
+        val onRecoverySubnet = manager.getLinkProperties(network)
             ?.linkAddresses
-            ?.any { address -> address.address.hostAddress?.startsWith("192.168.4.") == true }
-            == true
+            ?.any { address ->
+                address.address.hostAddress?.startsWith("192.168.4.") == true
+            } == true
+        onRecoverySubnet
     } ?: return false
 
     return runCatching { manager.bindProcessToNetwork(recoveryNetwork) }.getOrDefault(false)
