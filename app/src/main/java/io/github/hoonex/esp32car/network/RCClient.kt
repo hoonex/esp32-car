@@ -42,8 +42,8 @@ class RCClient {
     private val configCall = AtomicReference<Call?>(null)
     private val otaCall = AtomicReference<Call?>(null)
 
-    @Volatile
-    var motorTrim: Int = 0
+    @Volatile var motorTrim: Int = 0
+    @Volatile var controlKey: String = ""
 
     fun sendLight(ip: String, lightValue: Int) {
         requestAction(ip, "light" to lightValue.coerceIn(0, 255).toString(), slot = lightCall, label = "light")
@@ -86,6 +86,7 @@ class RCClient {
         ip: String,
         frameSize: Int,
         quality: Int,
+        streamFps: Int,
         brightness: Int,
         contrast: Int,
         saturation: Int,
@@ -96,6 +97,7 @@ class RCClient {
             ip,
             "stream_size" to frameSize.toString(),
             "stream_quality" to quality.coerceIn(4, 20).toString(),
+            "stream_fps" to streamFps.coerceIn(5, 20).toString(),
             "brightness" to brightness.coerceIn(-2, 2).toString(),
             "contrast" to contrast.coerceIn(-2, 2).toString(),
             "saturation" to saturation.coerceIn(-2, 2).toString(),
@@ -112,7 +114,7 @@ class RCClient {
 
     fun requestStatus(ip: String, callback: (Result<JSONObject>) -> Unit) {
         buildUrl(ip, "action") { addQueryParameter("go", "STATUS") }?.let { url ->
-            val call = client.newCall(Request.Builder().url(url).build())
+            val call = client.newCall(authenticatedBuilder(url).build())
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) = callback(Result.failure(e))
 
@@ -216,10 +218,18 @@ class RCClient {
         buildUrl(ip, "action") {
             params.forEach { (key, value) -> addQueryParameter(key, value) }
         }?.let { url ->
-            val call = client.newCall(Request.Builder().url(url).build())
+            val call = client.newCall(authenticatedBuilder(url).build())
             slot.getAndSet(call)?.cancel()
             enqueueAndClose(call, label)
         }
+    }
+
+    private fun authenticatedBuilder(url: HttpUrl): Request.Builder {
+        val builder = Request.Builder().url(url)
+        controlKey.trim().takeIf { it.isNotBlank() }?.let {
+            builder.header("X-ESP32-Control-Key", it)
+        }
+        return builder
     }
 
     private fun enqueueAndClose(call: Call, label: String) {
