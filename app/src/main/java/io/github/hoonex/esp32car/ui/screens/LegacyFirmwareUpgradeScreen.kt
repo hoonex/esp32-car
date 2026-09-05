@@ -6,12 +6,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -81,10 +81,7 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(if (compact) 9.dp else 14.dp)) {
-                    Surface(
-                        color = Color(0x28FFC857),
-                        shape = RoundedCornerShape(999.dp)
-                    ) {
+                    Surface(color = Color(0x28FFC857), shape = RoundedCornerShape(999.dp)) {
                         Row(
                             Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -132,12 +129,7 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                     Text("USB 없이 v3.3.0 설치", color = Color.White, fontSize = if (compact) 16.sp else 21.sp, fontWeight = FontWeight.Black)
                     Text("한 번만 복구 Wi-Fi에 연결하면 APK 안에 포함된 최신 펌웨어를 ESP32가 직접 받아 설치합니다.", color = LegacyMuted, fontSize = 9.sp)
 
-                    StepCard(
-                        number = "1",
-                        title = "업데이트 Wi-Fi 열기",
-                        detail = "ESP32-CAR-UPDATE / 비밀번호 esp32car",
-                        done = keyReady
-                    ) {
+                    StepCard("1", "업데이트 Wi-Fi 열기", "ESP32-CAR-UPDATE / 비밀번호 esp32car", keyReady) {
                         Button(
                             onClick = {
                                 viewModel.updateIp("192.168.4.1")
@@ -157,10 +149,10 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                     }
 
                     StepCard(
-                        number = "2",
-                        title = "ESP32-CAR-UPDATE 연결 확인",
-                        detail = if (recoveryReachable) "FW v${wifiStatus?.optString("fw")} 응답 확인됨" else "Wi-Fi 연결 후 앱으로 돌아와 확인",
-                        done = recoveryReachable
+                        "2",
+                        "ESP32-CAR-UPDATE 연결 확인",
+                        if (recoveryReachable) "FW v${wifiStatus?.optString("fw")} 응답 확인됨" else "Wi-Fi 연결 후 앱으로 돌아와 확인",
+                        recoveryReachable
                     ) {
                         OutlinedButton(
                             onClick = {
@@ -178,10 +170,10 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                     }
 
                     StepCard(
-                        number = "3",
-                        title = "v3.3.0 설치",
-                        detail = "업로드 후 재부팅된 실제 FW 버전까지 확인",
-                        done = update.stage == FirmwareUpdateUiState.Stage.SUCCESS
+                        "3",
+                        "v3.3.0 설치",
+                        "업로드 후 재부팅된 실제 FW 버전까지 확인",
+                        update.stage == FirmwareUpdateUiState.Stage.SUCCESS
                     ) {
                         if (updateBusy || update.stage == FirmwareUpdateUiState.Stage.SUCCESS || update.stage == FirmwareUpdateUiState.Stage.ERROR) {
                             if (update.stage == FirmwareUpdateUiState.Stage.UPLOADING || update.stage == FirmwareUpdateUiState.Stage.REBOOTING) {
@@ -222,7 +214,7 @@ private fun StepCard(
     title: String,
     detail: String,
     done: Boolean,
-    content: @Composable Column.() -> Unit
+    content: @Composable ColumnScope.() -> Unit
 ) {
     Surface(
         color = if (done) Color(0x1E19D790) else Color(0xFF141B23),
