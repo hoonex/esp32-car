@@ -10,8 +10,9 @@ class SettingsManager(context: Context) {
         get() = prefs.getString("preferred_mode", "BT") ?: "BT"
         set(value) = prefs.edit().putString("preferred_mode", value).apply()
 
+    // Blank until firmware actually reports a reachable station/recovery-AP address.
     var ipAddress: String
-        get() = prefs.getString("ip_address", "192.168.4.1") ?: "192.168.4.1"
+        get() = prefs.getString("ip_address", "") ?: ""
         set(value) = prefs.edit().putString("ip_address", value).apply()
 
     var otaKey: String
@@ -69,6 +70,10 @@ class SettingsManager(context: Context) {
     var streamQuality: Float
         get() = prefs.getFloat("stream_quality", 10f)
         set(value) = prefs.edit().putFloat("stream_quality", value.coerceIn(4f, 20f)).apply()
+
+    var streamFps: Float
+        get() = prefs.getFloat("stream_fps", 12f)
+        set(value) = prefs.edit().putFloat("stream_fps", value.coerceIn(5f, 20f)).apply()
 
     var cameraBrightness: Float
         get() = prefs.getFloat("camera_brightness", 0f)
