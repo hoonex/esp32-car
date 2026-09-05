@@ -1,7 +1,6 @@
 package io.github.hoonex.esp32car.ui.screens
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -24,9 +23,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.hoonex.esp32car.network.MjpegParser
 import io.github.hoonex.esp32car.network.RCClient
-import io.github.hoonex.esp32car.utils.SettingsManager
 import io.github.hoonex.esp32car.ui.theme.*
+import io.github.hoonex.esp32car.utils.SettingsManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -34,8 +34,8 @@ import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
+import java.io.BufferedInputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.abs
@@ -45,17 +45,19 @@ import kotlin.math.abs
 fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
     var ipInput by remember { mutableStateOf(settingsManager.ipAddress) }
     var isRunning by remember { mutableStateOf(false) }
-    var targetColor by remember { mutableStateOf("R") } // R, G, B
+    var targetColor by remember { mutableStateOf("R") }
     var latestBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var aiStatus by remember { mutableStateOf("대기 중") }
-    
-    // Config values based on python code
+
     val baseTurnSpeed = 40f
     val maxTurnSpeed = 70f
     val forwardSpeed = 100f
     val backwardSpeed = 85f
 
-    // Check OpenCV initialization
+    SideEffect {
+        rcClient.controlKey = settingsManager.otaKey
+    }
+
     LaunchedEffect(Unit) {
         if (!OpenCVLoader.initDebug()) {
             Log.e("OpenCV", "OpenCV initialization failed.")
@@ -64,35 +66,52 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
         }
     }
 
-    // Background streaming and OpenCV processing coroutine
     LaunchedEffect(isRunning, targetColor) {
         if (!isRunning) {
-            rcClient.sendCommand(ipInput, "stop", 0)
+            if (ipInput.isNotBlank() && rcClient.controlKey.isNotBlank()) {
+                rcClient.sendCommand(ipInput, "stop", 0)
+            }
             aiStatus = "정지됨"
             return@LaunchedEffect
         }
 
+        val controlKey = settingsManager.otaKey
+        if (controlKey.isBlank()) {
+            isRunning = false
+            aiStatus = "Bluetooth STATUS로 장치 키를 먼저 받아야 합니다."
+            return@LaunchedEffect
+        }
+
         withContext(Dispatchers.IO) {
-            val streamUrl = "http://${ipInput}:81/stream"
+            val host = ipInput.trim()
+                .removePrefix("http://")
+                .removePrefix("https://")
+                .substringBefore('/')
+                .substringBefore(':')
+            val streamUrl = "http://$host:81/stream"
             var connection: HttpURLConnection? = null
             try {
                 connection = URL(streamUrl).openConnection() as HttpURLConnection
-                connection.connectTimeout = 5000
-                connection.readTimeout = 5000
-                val inputStream: InputStream = java.io.BufferedInputStream(connection.inputStream, 65536)
+                connection.connectTimeout = 3000
+                connection.readTimeout = 7000
+                connection.useCaches = false
+                connection.setRequestProperty("X-ESP32-Control-Key", controlKey)
+                connection.connect()
+                if (connection.responseCode !in 200..299) {
+                    throw IOException("Camera HTTP ${connection.responseCode}")
+                }
 
-                var lastCommandTime = 0L
-                val CMD_COOLDOWN = 100L
+                BufferedInputStream(connection.inputStream, 64 * 1024).use { inputStream ->
+                    var lastCommandTime = 0L
+                    val commandCooldownMs = 100L
+                    var cxEma = -1f
+                    var areaEma = -1f
+                    val emaAlpha = 0.2f
 
-                // EMA Variables
-                var cxEma = -1f
-                var areaEma = -1f
-                val emaAlpha = 0.2f
+                    while (isActive) {
+                        val bitmap = MjpegParser.readFrame(inputStream)
+                            ?: throw IOException("Camera stream ended")
 
-                while (isActive) {
-                    val bitmap = io.github.hoonex.esp32car.network.MjpegParser.readFrame(inputStream)
-                    
-                    if (bitmap != null) {
                         try {
                             val (processedBmp, action, spd, area, errX, cxNew, areaNew) = processFrameOpenCV(
                                 bitmap, targetColor, cxEma, areaEma, emaAlpha,
@@ -103,25 +122,27 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
 
                             withContext(Dispatchers.Main) {
                                 latestBitmap = processedBmp
-                                if (action == "stop") {
-                                    aiStatus = "LOST / 정지 (면적: ${area.toInt()})"
+                                aiStatus = if (action == "stop") {
+                                    "LOST / 정지 (면적: ${area.toInt()})"
                                 } else {
-                                    aiStatus = "주행: $action (면적: ${area.toInt()}, 오차: ${errX.toInt()})"
+                                    "주행: $action (면적: ${area.toInt()}, 오차: ${errX.toInt()})"
                                 }
                             }
 
                             val now = System.currentTimeMillis()
-                            if (now - lastCommandTime > CMD_COOLDOWN) {
+                            if (now - lastCommandTime > commandCooldownMs) {
                                 rcClient.sendCommand(ipInput, action, spd)
                                 lastCommandTime = now
                             }
                         } catch (e: Exception) {
-                            e.printStackTrace()
+                            Log.e("AITracking", "frame processing failed", e)
+                            rcClient.sendCommand(ipInput, "stop", 0)
                         }
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("AITracking", "tracking link failed", e)
+                rcClient.sendCommand(ipInput, "stop", 0)
                 withContext(Dispatchers.Main) {
                     aiStatus = "연결 오류: ${e.message}"
                     isRunning = false
@@ -141,7 +162,6 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // --- Header Card ---
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = AppleSurface),
@@ -150,7 +170,8 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
                 .shadow(8.dp, RoundedCornerShape(20.dp), spotColor = Color.Black.copy(alpha = 0.05f))
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("AI 자율주행 (OpenCV 색상 추적)", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.Black)
+                Text("실험 기능 · OpenCV 색상 추적", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.Black)
+                Text("실차 수동 제어가 검증되기 전에는 테스트 공간에서만 사용하세요.", fontSize = 12.sp, color = AppleGray)
                 OutlinedTextField(
                     value = ipInput,
                     onValueChange = { ipInput = it },
@@ -172,7 +193,6 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // --- Status and Target Color ---
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = AppleSurface),
@@ -182,7 +202,7 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(aiStatus, fontWeight = FontWeight.Medium, color = if (isRunning) AppleBlue else AppleGray)
-                
+
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     ColorButton("R", AppleRed, targetColor == "R") { targetColor = "R" }
                     ColorButton("G", AppleGreen, targetColor == "G") { targetColor = "G" }
@@ -193,7 +213,6 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // --- Stream Output ---
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = Color.Black),
@@ -217,9 +236,14 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // --- Start/Stop Button ---
         Button(
-            onClick = { isRunning = !isRunning },
+            onClick = {
+                if (!isRunning && (ipInput.isBlank() || settingsManager.otaKey.isBlank())) {
+                    aiStatus = if (ipInput.isBlank()) "ESP32 Wi-Fi IP가 필요합니다." else "Bluetooth STATUS로 장치 키를 먼저 받아야 합니다."
+                } else {
+                    isRunning = !isRunning
+                }
+            },
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (isRunning) AppleRed else AppleGreen
             ),
@@ -231,7 +255,7 @@ fun AITrackingScreen(rcClient: RCClient, settingsManager: SettingsManager) {
             Icon(if (isRunning) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null, tint = Color.White)
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                if (isRunning) "자율주행 정지" else "자율주행 시작",
+                if (isRunning) "추적 정지" else "추적 시작",
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp,
                 color = Color.White
@@ -274,23 +298,17 @@ fun processFrameOpenCV(
     forwardSpeed: Float,
     backwardSpeed: Float
 ): OpenCVResult {
-    // 1. Convert Bitmap to Mat
     val mat = Mat()
     Utils.bitmapToMat(bitmap, mat)
 
-    // Optional: resize if too large to match Python (e.g. w//2, h//2)
-    // For QVGA (320x240) it's small enough, no resize needed.
     val w = mat.cols()
     val h = mat.rows()
 
-    // 2. Gaussian Blur
     Imgproc.GaussianBlur(mat, mat, Size(5.0, 5.0), 0.0)
 
-    // 3. Convert to HSV
     val hsv = Mat()
     Imgproc.cvtColor(mat, hsv, Imgproc.COLOR_RGB2HSV)
 
-    // 4. Create Mask based on target color
     val mask = Mat()
     when (targetColor) {
         "R" -> {
@@ -302,25 +320,18 @@ fun processFrameOpenCV(
             mask1.release()
             mask2.release()
         }
-        "G" -> {
-            Core.inRange(hsv, Scalar(40.0, 100.0, 70.0), Scalar(80.0, 255.0, 255.0), mask)
-        }
-        "B" -> {
-            Core.inRange(hsv, Scalar(90.0, 60.0, 50.0), Scalar(140.0, 255.0, 255.0), mask)
-        }
+        "G" -> Core.inRange(hsv, Scalar(40.0, 100.0, 70.0), Scalar(80.0, 255.0, 255.0), mask)
+        "B" -> Core.inRange(hsv, Scalar(90.0, 60.0, 50.0), Scalar(140.0, 255.0, 255.0), mask)
     }
 
-    // 5. Morphological operations (Open & Close) to remove noise
     val kernel = Mat.ones(Size(5.0, 5.0), CvType.CV_8U)
     Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel)
     Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel)
 
-    // 6. Find Contours
     val contours = ArrayList<MatOfPoint>()
     val hierarchy = Mat()
     Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
-    // 7. Find largest blob
     var maxArea = 0.0
     var bestContour: MatOfPoint? = null
     for (contour in contours) {
@@ -331,9 +342,9 @@ fun processFrameOpenCV(
         }
     }
 
-    val MIN_AREA = 1500.0
-    val TARGET_AREA = 7000.0
-    val AREA_BAND = 1500.0
+    val minArea = 1500.0
+    val targetArea = 7000.0
+    val areaBand = 1500.0
 
     var action = "stop"
     var spd = 0
@@ -346,7 +357,7 @@ fun processFrameOpenCV(
     val deadX = (w * deadRatio).toInt()
     val fineX = (w * fineRatio).toInt()
 
-    if (bestContour != null && maxArea > MIN_AREA) {
+    if (bestContour != null && maxArea > minArea) {
         val rect = Imgproc.boundingRect(bestContour)
         val cx = rect.x + rect.width / 2f
         val cy = rect.y + rect.height / 2f
@@ -363,59 +374,42 @@ fun processFrameOpenCV(
         val absErr = abs(errX)
         finalErrX = errX
 
-        // Status & Motor Logic
         if (absErr < deadX) {
-            if (areaEmaOut < TARGET_AREA - AREA_BAND) {
+            if (areaEmaOut < targetArea - areaBand) {
                 action = "forward"
                 spd = forwardSpeed.toInt()
-            } else if (areaEmaOut > TARGET_AREA + AREA_BAND) {
+            } else if (areaEmaOut > targetArea + areaBand) {
                 action = "backward"
                 spd = backwardSpeed.toInt()
-            } else {
-                action = "stop"
-                spd = 0
             }
         } else {
-            // Turn speed proportional calculation
             val errNorm = (absErr / (w / 2f)).coerceAtMost(1f)
             spd = (baseTurnSpeed + (maxTurnSpeed - baseTurnSpeed) * errNorm).toInt()
-
-            if (errX < 0) {
-                action = "left"
-            } else {
-                action = "right"
-            }
+            action = if (errX < 0) "left" else "right"
         }
 
-        // 8. Visualization drawing
-        // Bounding Box
-        Imgproc.rectangle(mat, Point(rect.x.toDouble(), rect.y.toDouble()), Point((rect.x + rect.width).toDouble(), (rect.y + rect.height).toDouble()), Scalar(0.0, 255.0, 0.0, 255.0), 3)
-        // Center of target
+        Imgproc.rectangle(
+            mat,
+            Point(rect.x.toDouble(), rect.y.toDouble()),
+            Point((rect.x + rect.width).toDouble(), (rect.y + rect.height).toDouble()),
+            Scalar(0.0, 255.0, 0.0, 255.0),
+            3
+        )
         Imgproc.circle(mat, Point(cxEmaOut.toDouble(), cy.toDouble()), 8, Scalar(255.0, 255.0, 255.0, 255.0), -1)
         Imgproc.circle(mat, Point(cxEmaOut.toDouble(), cy.toDouble()), 10, Scalar(0.0, 255.0, 0.0, 255.0), 2)
-    } else {
-        // Lost or Too small
-        action = "stop"
-        spd = 0
     }
 
-    // Screen Center and Guides
     Imgproc.circle(mat, Point(w / 2.0, h / 2.0), 6, Scalar(0.0, 255.0, 255.0, 255.0), -1)
     Imgproc.line(mat, Point(w / 2.0, 0.0), Point(w / 2.0, h.toDouble()), Scalar(255.0, 255.0, 0.0, 255.0), 2)
-    
-    // Deadzone lines
     Imgproc.line(mat, Point((w / 2.0 - deadX), 0.0), Point((w / 2.0 - deadX), h.toDouble()), Scalar(0.0, 255.0, 0.0, 255.0), 3)
     Imgproc.line(mat, Point((w / 2.0 + deadX), 0.0), Point((w / 2.0 + deadX), h.toDouble()), Scalar(0.0, 255.0, 0.0, 255.0), 3)
-    
-    // Finezone lines
     Imgproc.line(mat, Point((w / 2.0 - fineX), 0.0), Point((w / 2.0 - fineX), h.toDouble()), Scalar(255.0, 165.0, 0.0, 255.0), 2)
     Imgproc.line(mat, Point((w / 2.0 + fineX), 0.0), Point((w / 2.0 + fineX), h.toDouble()), Scalar(255.0, 165.0, 0.0, 255.0), 2)
 
-    // Convert back to Bitmap
     val resultBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
     Utils.matToBitmap(mat, resultBmp)
 
-    // Release native memory
+    contours.forEach { it.release() }
     mat.release()
     hsv.release()
     mask.release()
