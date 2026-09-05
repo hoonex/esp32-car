@@ -10,7 +10,6 @@ class SettingsManager(context: Context) {
         get() = prefs.getString("preferred_mode", "BT") ?: "BT"
         set(value) = prefs.edit().putString("preferred_mode", value).apply()
 
-    // Blank until firmware actually reports a reachable station/recovery-AP address.
     var ipAddress: String
         get() = prefs.getString("ip_address", "") ?: ""
         set(value) = prefs.edit().putString("ip_address", value).apply()
