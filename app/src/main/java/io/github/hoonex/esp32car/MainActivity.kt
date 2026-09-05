@@ -36,7 +36,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import io.github.hoonex.esp32car.bluetooth.ConnectionState
+import io.github.hoonex.esp32car.ui.screens.LegacyFirmwareUpgradeScreen
 import io.github.hoonex.esp32car.ui.screens.ReliableCockpitScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.update.AppUpdater
@@ -53,7 +56,6 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        // App updates are checked automatically, but Bluetooth connection is always user initiated.
         lifecycleScope.launch {
             AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
         }
@@ -61,7 +63,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 BluetoothPermissionGate {
-                    ReliableCockpitScreen(rcViewModel)
+                    val btState by rcViewModel.bluetooth.connectionState.collectAsStateWithLifecycle()
+                    if (btState == ConnectionState.LEGACY_UPGRADE) {
+                        LegacyFirmwareUpgradeScreen(rcViewModel)
+                    } else {
+                        ReliableCockpitScreen(rcViewModel)
+                    }
                 }
             }
         }
