@@ -1,4 +1,4 @@
-// ESP32 Car firmware v3.2.0
+// ESP32 Car firmware v3.3.0
 // Target: AI Thinker ESP32-CAM + OV2640 + 2WD chassis + L298N four-input motor driver
 // Motor wiring profile: LEFT GPIO13/12, RIGHT GPIO14/15, flash LED GPIO4
 
@@ -48,11 +48,13 @@ static const int MOTOR_PWM_FREQ = 18000;
 static const int LED_PWM_FREQ = 5000;
 static const int PWM_BITS = 8;
 
-static const char* FW_VERSION = "3.2.0";
+static const char* FW_VERSION = "3.3.0";
+static const int PROTOCOL_VERSION = 2;
 static const char* HARDWARE_PROFILE = "AI_THINKER_ESP32_CAM_2WD_L298N";
 static const char* UPDATE_AP_SSID = "ESP32-CAR-UPDATE";
 static const char* UPDATE_AP_PASSWORD = "esp32car";
 static const uint32_t DRIVE_DEADMAN_MS = 450;
+static const int DEFAULT_STREAM_FPS = 12;
 
 Preferences preferences;
 BluetoothSerial SerialBT;
@@ -63,19 +65,26 @@ String btBuffer;
 String serialBuffer;
 
 bool wifiOnline = false;
+bool recoveryApActive = false;
 bool cameraStarted = false;
 bool serversStarted = false;
 bool otaStarted = false;
 bool pendingRestart = false;
 uint32_t restartAtMs = 0;
+volatile bool btEmergencyStopRequested = false;
+volatile bool sppClientConnected = false;
 
 bool motorSwap = false;
 bool invertLeft = false;
 bool invertRight = false;
 int currentSpeed = 190;
 int currentTrim = 0;
+int currentLogicalLeft = 0;
+int currentLogicalRight = 0;
 uint32_t lastDriveCommandMs = 0;
+uint32_t deadmanTrips = 0;
 bool driveActive = false;
+int streamFps = DEFAULT_STREAM_FPS;
 
 httpd_handle_t cameraHttpd = NULL;
 httpd_handle_t streamHttpd = NULL;
@@ -175,23 +184,29 @@ void motorsStop() {
   ledcWrite(MOTOR_L_PIN_2, 0);
   ledcWrite(MOTOR_R_PIN_1, 0);
   ledcWrite(MOTOR_R_PIN_2, 0);
+  currentLogicalLeft = 0;
+  currentLogicalRight = 0;
   driveActive = false;
 }
 
 void motorsSet(int logicalLeft, int logicalRight) {
   logicalLeft = constrain(logicalLeft, -255, 255);
   logicalRight = constrain(logicalRight, -255, 255);
+  currentLogicalLeft = logicalLeft;
+  currentLogicalRight = logicalRight;
 
+  int physicalLeft = logicalLeft;
+  int physicalRight = logicalRight;
   if (motorSwap) {
-    int temp = logicalLeft;
-    logicalLeft = logicalRight;
-    logicalRight = temp;
+    int temp = physicalLeft;
+    physicalLeft = physicalRight;
+    physicalRight = temp;
   }
-  if (invertLeft) logicalLeft = -logicalLeft;
-  if (invertRight) logicalRight = -logicalRight;
+  if (invertLeft) physicalLeft = -physicalLeft;
+  if (invertRight) physicalRight = -physicalRight;
 
-  writeLeftPhysical(logicalLeft);
-  writeRightPhysical(logicalRight);
+  writeLeftPhysical(physicalLeft);
+  writeRightPhysical(physicalRight);
   lastDriveCommandMs = millis();
   driveActive = (logicalLeft != 0 || logicalRight != 0);
 }
@@ -268,6 +283,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
   if (res != ESP_OK) return res;
 
   while (true) {
+    uint32_t frameStartedAt = millis();
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) return ESP_FAIL;
 
@@ -282,6 +298,10 @@ static esp_err_t streamHandler(httpd_req_t* req) {
       break;
     }
     esp_camera_fb_return(fb);
+
+    const uint32_t frameBudgetMs = 1000U / (uint32_t)constrain(streamFps, 5, 20);
+    uint32_t elapsed = millis() - frameStartedAt;
+    if (elapsed < frameBudgetMs) delay(frameBudgetMs - elapsed);
   }
   return ESP_OK;
 }
@@ -299,11 +319,14 @@ static esp_err_t captureHandler(httpd_req_t* req) {
 }
 
 String statusJson(bool includeKey) {
-  String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
-  String ssid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(UPDATE_AP_SSID);
-  long rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  bool stationConnected = WiFi.status() == WL_CONNECTED;
+  String ip = stationConnected ? WiFi.localIP().toString() : (recoveryApActive ? WiFi.softAPIP().toString() : String("0.0.0.0"));
+  String ssid = stationConnected ? WiFi.SSID() : (recoveryApActive ? String(UPDATE_AP_SSID) : String(""));
+  long rssi = stationConnected ? WiFi.RSSI() : 0;
+  String mode = stationConnected ? "WIFI_STA" : (recoveryApActive ? "RECOVERY_AP" : "BT");
   String json = "{";
-  json += "\"mode\":\"" + String(wifiOnline ? "HYBRID" : "BT") + "\",";
+  json += "\"protocol\":" + String(PROTOCOL_VERSION) + ",";
+  json += "\"mode\":\"" + mode + "\",";
   json += "\"ip\":\"" + ip + "\",";
   json += "\"ssid\":\"" + ssid + "\",";
   json += "\"rssi\":" + String(rssi) + ",";
@@ -313,16 +336,38 @@ String statusJson(bool includeKey) {
   json += "\"motor_swap\":" + String(motorSwap ? "true" : "false") + ",";
   json += "\"invert_left\":" + String(invertLeft ? "true" : "false") + ",";
   json += "\"invert_right\":" + String(invertRight ? "true" : "false") + ",";
+  json += "\"left_pwm\":" + String(currentLogicalLeft) + ",";
+  json += "\"right_pwm\":" + String(currentLogicalRight) + ",";
   json += "\"heap\":" + String(ESP.getFreeHeap()) + ",";
+  json += "\"min_heap\":" + String(ESP.getMinFreeHeap()) + ",";
+  json += "\"psram_free\":" + String(psramFound() ? ESP.getFreePsram() : 0) + ",";
   json += "\"uptime_ms\":" + String(millis()) + ",";
   json += "\"deadman_ms\":" + String(DRIVE_DEADMAN_MS) + ",";
+  json += "\"deadman_trips\":" + String(deadmanTrips) + ",";
+  json += "\"stream_fps\":" + String(streamFps) + ",";
+  json += "\"camera\":" + String(cameraStarted ? "true" : "false") + ",";
+  json += "\"spp_connected\":" + String(sppClientConnected ? "true" : "false") + ",";
   json += "\"ota\":true";
   if (includeKey) json += ",\"ota_key\":\"" + otaKey + "\"";
   json += "}";
   return json;
 }
 
+bool controlAuthorized(httpd_req_t* req) {
+  size_t len = httpd_req_get_hdr_value_len(req, "X-ESP32-Control-Key");
+  if (len == 0 || len > 64) return false;
+  char value[65];
+  if (httpd_req_get_hdr_value_str(req, "X-ESP32-Control-Key", value, sizeof(value)) != ESP_OK) return false;
+  return otaKey == String(value);
+}
+
 static esp_err_t actionHandler(httpd_req_t* req) {
+  if (!controlAuthorized(req)) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+  }
+
   size_t queryLen = httpd_req_get_url_query_len(req) + 1;
   if (queryLen <= 1) {
     httpd_resp_set_type(req, "text/plain");
@@ -379,6 +424,8 @@ static esp_err_t actionHandler(httpd_req_t* req) {
       cameraSensor->set_quality(cameraSensor, constrain(atoi(value), 4, 20));
     if (httpd_query_key_value(query, "stream_size", value, sizeof(value)) == ESP_OK)
       cameraSensor->set_framesize(cameraSensor, (framesize_t)constrain(atoi(value), 0, 8));
+    if (httpd_query_key_value(query, "stream_fps", value, sizeof(value)) == ESP_OK)
+      streamFps = constrain(atoi(value), 5, 20);
     if (httpd_query_key_value(query, "brightness", value, sizeof(value)) == ESP_OK)
       cameraSensor->set_brightness(cameraSensor, constrain(atoi(value), -2, 2));
     if (httpd_query_key_value(query, "contrast", value, sizeof(value)) == ESP_OK)
@@ -479,8 +526,9 @@ static esp_err_t indexHandler(httpd_req_t* req) {
   const char* page =
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<style>body{background:#080b10;color:#fff;font-family:sans-serif;margin:24px}img{max-width:100%}</style></head>"
-    "<body><h2>ESP32 Car 3.2</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p><img src='http://";
-  String html = String(page) + WiFi.localIP().toString() + ":81/stream'><p>Use the Android app for controls.</p></body></html>";
+    "<body><h2>ESP32 Car 3.3</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p><img src='http://";
+  String host = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  String html = String(page) + host + ":81/stream'><p>Use the Android app for controls.</p></body></html>";
   httpd_resp_set_type(req, "text/html");
   return httpd_resp_send(req, html.c_str(), html.length());
 }
@@ -525,24 +573,32 @@ void startOta() {
   otaStarted = true;
 }
 
+void startRecoveryAp();
+
 bool connectWifiAndStart() {
   loadWifiCredentials();
-  if (wifiSsid.isEmpty()) return false;
+  if (wifiSsid.isEmpty()) {
+    Serial.println("[WIFI] no credentials; starting recovery AP");
+    startRecoveryAp();
+    return false;
+  }
 
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD);
+  motorsStop();
+  recoveryApActive = false;
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
   for (int i = 0; i < 24 && WiFi.status() != WL_CONNECTED; i++) delay(250);
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WIFI] station connection failed; recovery AP remains available");
-    wifiOnline = true;
-    startServers();
-    startOta();
+    Serial.println("[WIFI] station connection failed; starting recovery AP");
+    WiFi.disconnect(true, false);
+    startRecoveryAp();
     return false;
   }
 
   wifiOnline = true;
+  recoveryApActive = false;
   startServers();
   startOta();
   Serial.printf("[WIFI] %s @ %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
@@ -553,18 +609,32 @@ void startRecoveryAp() {
   motorsStop();
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD);
+  recoveryApActive = true;
   wifiOnline = true;
   startServers();
   startOta();
 }
 
 // ===== Bluetooth SPP =====
+void onBluetoothEvent(esp_spp_cb_event_t event, esp_spp_cb_param_t* param) {
+  if (event == ESP_SPP_SRV_OPEN_EVT) {
+    sppClientConnected = true;
+  } else if (event == ESP_SPP_CLOSE_EVT) {
+    sppClientConnected = false;
+    btEmergencyStopRequested = true;
+  }
+}
+
 void processBluetoothCommand(String cmd) {
   cmd.trim();
   if (cmd.isEmpty()) return;
 
   if (cmd == "STATUS") {
     SerialBT.println(statusJson(true));
+    return;
+  }
+  if (cmd == "PING") {
+    SerialBT.println("PONG:" + String(millis()));
     return;
   }
   if (cmd.startsWith("W:")) {
@@ -666,17 +736,25 @@ void setup() {
   motorsStop();
   otaKey = loadOrCreateOtaKey();
 
-  SerialBT.begin("ESP32_CAM_RC");
+  SerialBT.register_callback(onBluetoothEvent);
+  bool btReady = SerialBT.begin("ESP32_CAM_RC");
   Serial.printf("\nESP32 Car FW %s\n", FW_VERSION);
   Serial.printf("Board: AI Thinker ESP32-CAM\nProfile: %s\n", HARDWARE_PROFILE);
+  Serial.printf("Protocol: %d\n", PROTOCOL_VERSION);
   Serial.println("Pins: L=13/12 R=14/15 flash=4");
   Serial.printf("Deadman: %u ms\n", DRIVE_DEADMAN_MS);
+  Serial.printf("Bluetooth: %s\n", btReady ? "ready" : "FAILED");
 
   loadWifiCredentials();
   if (!wifiSsid.isEmpty()) connectWifiAndStart();
 }
 
 void loop() {
+  if (btEmergencyStopRequested) {
+    btEmergencyStopRequested = false;
+    motorsStop();
+  }
+
   if (pendingRestart && (int32_t)(millis() - restartAtMs) >= 0) {
     motorsStop();
     delay(80);
@@ -684,6 +762,7 @@ void loop() {
   }
 
   if (driveActive && millis() - lastDriveCommandMs > DRIVE_DEADMAN_MS) {
+    deadmanTrips++;
     motorsStop();
   }
 
