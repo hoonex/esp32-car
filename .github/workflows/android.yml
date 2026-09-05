@@ -2,7 +2,7 @@ name: Build Android + Firmware
 
 on:
   push:
-    branches: [main, 'feat/**', 'fix/**', 'chore/**']
+    branches: [main, 'feat/**', 'fix/**', 'chore/**', 'hardening/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -135,6 +135,9 @@ jobs:
     needs: firmware
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    outputs:
+      apk_artifact: ${{ steps.apk_meta.outputs.artifact_name }}
+      persistent_signing: ${{ steps.signing.outputs.available }}
 
     steps:
       - name: Checkout
@@ -171,20 +174,75 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Test, lint, and assemble APK
+      - name: Test, lint, and assemble debug APK
         run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Verify bundled firmware exists in APK
+      - name: Prepare persistent release signing
+        id: signing
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD_SECRET: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS_SECRET: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD_SECRET: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'assets/firmware/esp32-car.bin'
-          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'assets/firmware/manifest.json'
+          set -euo pipefail
+          if [ -n "$ANDROID_KEYSTORE_B64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD_SECRET" ] && [ -n "$ANDROID_KEY_ALIAS_SECRET" ] && [ -n "$ANDROID_KEY_PASSWORD_SECRET" ]; then
+            KEYSTORE="$RUNNER_TEMP/esp32-car-release.jks"
+            printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
+            test -s "$KEYSTORE"
+            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS_SECRET" >> "$GITHUB_ENV"
+            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD_SECRET" >> "$GITHUB_ENV"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Persistent Android signing secrets are not configured; official Android release will be skipped."
+          fi
 
-      - name: Upload debug APK
+      - name: Build persistent-signed release APK
+        if: steps.signing.outputs.available == 'true'
+        run: gradle :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Select APK artifact
+        id: apk_meta
+        shell: bash
+        env:
+          SIGNED: ${{ steps.signing.outputs.available }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/build/ci-apk
+          if [ "$SIGNED" = "true" ]; then
+            cp app/build/outputs/apk/release/app-release.apk app/build/ci-apk/app.apk
+            echo "artifact_name=esp32-car-release-apk" >> "$GITHUB_OUTPUT"
+            echo "kind=persistent-signed-release" >> "$GITHUB_OUTPUT"
+          else
+            cp app/build/outputs/apk/debug/app-debug.apk app/build/ci-apk/app.apk
+            echo "artifact_name=esp32-car-test-debug-apk" >> "$GITHUB_OUTPUT"
+            echo "kind=ephemeral-debug-test-only" >> "$GITHUB_OUTPUT"
+          fi
+          test -s app/build/ci-apk/app.apk
+
+      - name: Verify bundled firmware and APK signature
+        shell: bash
+        env:
+          SIGNED: ${{ steps.signing.outputs.available }}
+        run: |
+          set -euo pipefail
+          unzip -l app/build/ci-apk/app.apk | grep 'assets/firmware/esp32-car.bin'
+          unzip -l app/build/ci-apk/app.apk | grep 'assets/firmware/manifest.json'
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs app/build/ci-apk/app.apk
+          if [ "$SIGNED" = "true" ]; then
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose app/build/ci-apk/app.apk
+          fi
+
+      - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-car-ota-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ${{ steps.apk_meta.outputs.artifact_name }}
+          path: app/build/ci-apk/app.apk
           if-no-files-found: error
 
   windows-installer:
@@ -250,7 +308,7 @@ jobs:
           if-no-files-found: error
 
   release-android:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.android.outputs.persistent_signing == 'true'
     needs: [firmware, android, windows-installer]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -279,11 +337,11 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download Android APK artifact
+      - name: Download persistent-signed Android APK
         if: steps.release_meta.outputs.exists != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: esp32-car-ota-debug-apk
+          name: ${{ needs.android.outputs.apk_artifact }}
           path: release/android
 
       - name: Download existing published APK without replacing it
@@ -323,7 +381,7 @@ jobs:
           if [ "$RELEASE_EXISTS" = "true" ]; then
             cp "release/android/ESP32-Car-v${APP_VERSION}.apk" "release/ESP32-Car-v${APP_VERSION}.apk"
           else
-            mv release/android/app-debug.apk "release/ESP32-Car-v${APP_VERSION}.apk"
+            mv release/android/app.apk "release/ESP32-Car-v${APP_VERSION}.apk"
           fi
           mv release/windows/ESP32-Car-First-Install-Windows.zip "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip"
           cp release/firmware/firmware.bin "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin"
@@ -343,13 +401,15 @@ jobs:
           cat > release/RELEASE_NOTES.md <<EOF
           ESP32 Car Android v${APP_VERSION}
 
+          - Persistent-signed Android release APK; CI debug APKs are test-only and never published as official releases
+          - Manual, profile-verified Bluetooth SPP connection flow
+          - Conflated joystick commands to prevent stale motion backlog
           - Landscape RC cockpit with ESP32-CAM video and Bluetooth/Wi-Fi control
           - AI Thinker ESP32-CAM + 2WD L298N hardware profile
-          - ESP32-side 450 ms dead-man failsafe
-          - Android app OTA firmware update support
-          - First-install package now matches the official Arduino ESP32 upload layout exactly:
-            0x1000 bootloader, 0x8000 partitions, 0xE000 boot_app0, 0x10000 application
-          - Factory image contains all four required images, including boot_app0 / OTA-data initialization
+          - ESP32-side dead-man failsafe and Bluetooth-disconnect emergency stop
+          - Authenticated Wi-Fi control and keyed OTA firmware update
+          - Post-reboot firmware-version verification after OTA
+          - First-install package matches Arduino ESP32 upload layout: 0x1000 bootloader, 0x8000 partitions, 0xE000 boot_app0, 0x10000 application
 
           Built from main commit ${GITHUB_SHA}.
           ESP32 firmware: ${FW_VERSION}.

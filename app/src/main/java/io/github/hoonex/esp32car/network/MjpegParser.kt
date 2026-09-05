@@ -2,60 +2,57 @@ package io.github.hoonex.esp32car.network
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import java.io.InputStream
 import java.io.ByteArrayOutputStream
-import java.io.BufferedInputStream
+import java.io.InputStream
 
 object MjpegParser {
+    private const val MAX_HEADER_BYTES = 8 * 1024
+    private const val MAX_FRAME_BYTES = 2 * 1024 * 1024
+    private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
+
     fun readFrame(inputStream: InputStream): Bitmap? {
-        val headerBytes = readUntil(inputStream, "\r\n\r\n".toByteArray()) ?: return null
-        val headerStr = String(headerBytes)
-        
-        var contentLength = -1
-        headerStr.split("\n", "\r\n").forEach { line ->
-            if (line.trim().startsWith("Content-Length:", ignoreCase = true)) {
-                contentLength = line.substringAfter(":").trim().toIntOrNull() ?: -1
-            }
+        val headerBytes = readUntil(inputStream, HEADER_END, MAX_HEADER_BYTES) ?: return null
+        val header = String(headerBytes, Charsets.US_ASCII)
+        val contentLength = header.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("Content-Length:", ignoreCase = true) }
+            ?.substringAfter(':')
+            ?.trim()
+            ?.toIntOrNull()
+            ?: return null
+
+        if (contentLength !in 1..MAX_FRAME_BYTES) return null
+
+        val frameData = ByteArray(contentLength)
+        var offset = 0
+        while (offset < contentLength) {
+            val read = inputStream.read(frameData, offset, contentLength - offset)
+            if (read < 0) return null
+            if (read == 0) continue
+            offset += read
         }
 
-        if (contentLength > 0) {
-            val frameData = ByteArray(contentLength)
-            var bytesRead = 0
-            while (bytesRead < contentLength) {
-                val read = inputStream.read(frameData, bytesRead, contentLength - bytesRead)
-                if (read == -1) return null
-                bytesRead += read
-            }
-            
-            val rawBitmap = BitmapFactory.decodeByteArray(frameData, 0, frameData.size)
-            return rawBitmap?.let {
-                if (it.config != Bitmap.Config.ARGB_8888) {
-                    it.copy(Bitmap.Config.ARGB_8888, true)
-                } else {
-                    it
-                }
-            }
+        val options = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        
-        // Fallback: no content length found, just read until FF D9
-        return null
+        return BitmapFactory.decodeByteArray(frameData, 0, frameData.size, options)
     }
 
-    private fun readUntil(inputStream: InputStream, sequence: ByteArray): ByteArray? {
-        val out = ByteArrayOutputStream()
+    private fun readUntil(inputStream: InputStream, sequence: ByteArray, maxBytes: Int): ByteArray? {
+        val out = ByteArrayOutputStream(minOf(512, maxBytes))
         var matchIndex = 0
-        while (true) {
-            val byte = inputStream.read()
-            if (byte == -1) return null
-            out.write(byte)
-            if (byte.toByte() == sequence[matchIndex]) {
+        while (out.size() < maxBytes) {
+            val next = inputStream.read()
+            if (next < 0) return null
+            out.write(next)
+            val b = next.toByte()
+            if (b == sequence[matchIndex]) {
                 matchIndex++
-                if (matchIndex == sequence.size) {
-                    return out.toByteArray()
-                }
+                if (matchIndex == sequence.size) return out.toByteArray()
             } else {
-                matchIndex = if (byte.toByte() == sequence[0]) 1 else 0
+                matchIndex = if (b == sequence[0]) 1 else 0
             }
         }
+        return null
     }
 }

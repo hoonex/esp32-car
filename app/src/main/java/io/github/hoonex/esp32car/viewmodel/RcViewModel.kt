@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.security.MessageDigest
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -37,7 +38,10 @@ data class FirmwareUpdateUiState(
 class RcViewModel(application: Application) : AndroidViewModel(application) {
     val settings = SettingsManager(application)
     val bluetooth = ClassicBluetoothManager(application)
-    val rcClient = RCClient().apply { motorTrim = settings.trim.toInt() }
+    val rcClient = RCClient().apply {
+        motorTrim = settings.trim.toInt()
+        controlKey = settings.otaKey
+    }
 
     private val _transportMode = MutableStateFlow(
         if (settings.preferredMode == "WIFI") TransportMode.WIFI else TransportMode.BLUETOOTH
@@ -68,7 +72,6 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             bluetooth.connectionState.collect { state ->
                 if (state == ConnectionState.CONNECTED) {
-                    // Bluetooth SPP is the primary low-latency control path. Wi-Fi can stay active for video.
                     _transportMode.value = TransportMode.BLUETOOTH
                     settings.preferredMode = "BT"
                     syncBluetoothTuning()
@@ -87,12 +90,19 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             bluetooth.btStatusResponse.collect { status ->
                 status ?: return@collect
-                status.optString("ota_key").takeIf { it.isNotBlank() }?.let { settings.otaKey = it }
+                status.optString("ota_key").takeIf { it.isNotBlank() }?.let { key ->
+                    settings.otaKey = key
+                    rcClient.controlKey = key
+                }
                 status.optString("fw").takeIf { it.isNotBlank() }?.let { settings.lastFirmwareVersion = it }
-                status.optString("ip").takeIf { it.isNotBlank() && it != "0.0.0.0" }?.let { settings.ipAddress = it }
+
+                val reportedIp = status.optString("ip").trim()
+                settings.ipAddress = reportedIp.takeIf { it.isNotBlank() && it != "0.0.0.0" }.orEmpty()
+
                 if (status.has("motor_swap")) settings.swapMotors = status.optBoolean("motor_swap")
                 if (status.has("invert_left")) settings.invertLeftMotor = status.optBoolean("invert_left")
                 if (status.has("invert_right")) settings.invertRightMotor = status.optBoolean("invert_right")
+                if (status.has("stream_fps")) settings.streamFps = status.optInt("stream_fps", settings.streamFps.toInt()).toFloat()
             }
         }
     }
@@ -113,8 +123,8 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnectBluetooth() = bluetooth.disconnect()
 
     fun isControlLinkReady(): Boolean = when (_transportMode.value) {
-        TransportMode.BLUETOOTH -> bluetooth.connectionState.value == ConnectionState.CONNECTED
-        TransportMode.WIFI -> settings.ipAddress.isNotBlank()
+        TransportMode.BLUETOOTH -> bluetooth.connectionState.value == ConnectionState.CONNECTED && bluetooth.linkVerified.value
+        TransportMode.WIFI -> settings.ipAddress.isNotBlank() && rcClient.controlKey.isNotBlank()
     }
 
     fun updateIp(ip: String) {
@@ -230,7 +240,6 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     fun provisionWifi(ssid: String, password: String) {
         if (ssid.isBlank() || bluetooth.connectionState.value != ConnectionState.CONNECTED) return
         bluetooth.sendCommand(RcProtocol.provisionWifi(ssid, password))
-        bluetooth.sendCommand(RcProtocol.STATUS)
     }
 
     fun switchEsp32ToWifi() {
@@ -244,12 +253,11 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             failFirmwareUpdate("Bluetooth를 먼저 연결하세요.")
             return
         }
-        settings.ipAddress = "192.168.4.1"
         bluetooth.sendCommand(RcProtocol.START_OTA_AP)
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
             stage = FirmwareUpdateUiState.Stage.IDLE,
             progress = 0,
-            message = "ESP32-CAR-UPDATE Wi-Fi에 연결하세요 · 비밀번호 esp32car · IP 192.168.4.1"
+            message = "복구 AP 시작 요청됨 · ESP32-CAR-UPDATE / esp32car"
         )
     }
 
@@ -299,6 +307,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             ip = settings.ipAddress,
             frameSize = size,
             quality = settings.streamQuality.toInt(),
+            streamFps = settings.streamFps.toInt(),
             brightness = settings.cameraBrightness.toInt(),
             contrast = settings.cameraContrast.toInt(),
             saturation = settings.cameraSaturation.toInt(),
@@ -331,7 +340,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         val ip = settings.ipAddress
         val key = settings.otaKey
         if (ip.isBlank()) {
-            failFirmwareUpdate("ESP32 IP가 없습니다.")
+            failFirmwareUpdate("ESP32 IP가 없습니다. 먼저 Wi-Fi 또는 복구 AP를 시작하세요.")
             return
         }
         if (key.isBlank()) {
@@ -343,22 +352,19 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
             stage = FirmwareUpdateUiState.Stage.PREPARING,
             progress = 0,
-            message = "AI Thinker 2WD 펌웨어 준비 중"
+            message = "번들 펌웨어 무결성 확인 중"
         )
 
         viewModelScope.launch {
-            val bytes = withContext(Dispatchers.IO) {
-                runCatching {
-                    getApplication<Application>().assets.open("firmware/esp32-car.bin").use { it.readBytes() }
+            val bundle = withContext(Dispatchers.IO) { loadAndValidateBundledFirmware() }
+                .getOrElse {
+                    failFirmwareUpdate(it.message ?: "번들 펌웨어 검증 실패")
+                    return@launch
                 }
-            }.getOrElse {
-                failFirmwareUpdate("이 APK에 firmware.bin이 포함되어 있지 않습니다: ${it.message}")
-                return@launch
-            }
 
             rcClient.uploadFirmware(
                 ip = ip,
-                firmware = bytes,
+                firmware = bundle.bytes,
                 otaKey = key,
                 onProgress = { sent, total ->
                     val percent = if (total <= 0) 0 else ((sent * 100L) / total).toInt().coerceIn(0, 100)
@@ -373,17 +379,9 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     _firmwareUpdate.value = _firmwareUpdate.value.copy(
                         stage = FirmwareUpdateUiState.Stage.REBOOTING,
                         progress = 100,
-                        message = "플래시 완료 · ESP32 재부팅 확인 중"
+                        message = "플래시 전송 완료 · v${bundle.version} 재부팅 검증 중"
                     )
-                    viewModelScope.launch {
-                        delay(3500)
-                        _firmwareUpdate.value = _firmwareUpdate.value.copy(
-                            stage = FirmwareUpdateUiState.Stage.SUCCESS,
-                            progress = 100,
-                            message = "펌웨어 업데이트 완료"
-                        )
-                        refreshWifiStatus()
-                    }
+                    verifyFirmwareAfterOta(ip, bundle.version, attempt = 0)
                 }.onFailure {
                     failFirmwareUpdate(it.message ?: "펌웨어 업데이트 실패")
                 }
@@ -410,9 +408,65 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         bluetooth.sendCommand(RcProtocol.speed(settings.speed))
         bluetooth.sendCommand(RcProtocol.trim(settings.trim))
         bluetooth.sendCommand(RcProtocol.light(settings.light))
-        bluetooth.sendCommand(
-            RcProtocol.motorConfig(settings.swapMotors, settings.invertLeftMotor, settings.invertRightMotor)
-        )
+        // Motor swap/inversion are device calibration. Never overwrite them automatically on connect.
+        // STATUS imports the device's actual values; changes are sent only by applyMotorConfig().
+    }
+
+    private data class BundledFirmware(val bytes: ByteArray, val version: String, val sha256: String)
+
+    private fun loadAndValidateBundledFirmware(): Result<BundledFirmware> = runCatching {
+        val app = getApplication<Application>()
+        val manifestText = app.assets.open("firmware/manifest.json").bufferedReader().use { it.readText() }
+        val manifest = JSONObject(manifestText)
+        val expectedSha = manifest.optString("sha256").lowercase().trim()
+        val version = manifest.optString("version").ifBlank { error("펌웨어 manifest에 version이 없습니다.") }
+        if (expectedSha.length != 64) error("펌웨어 manifest SHA-256이 유효하지 않습니다.")
+
+        val bytes = app.assets.open("firmware/esp32-car.bin").use { it.readBytes() }
+        if (bytes.isEmpty()) error("APK에 포함된 firmware.bin이 비어 있습니다.")
+        val actualSha = MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        if (actualSha != expectedSha) error("APK 내부 펌웨어 SHA-256 불일치")
+        BundledFirmware(bytes, version, actualSha)
+    }
+
+    private fun verifyFirmwareAfterOta(ip: String, expectedVersion: String, attempt: Int) {
+        viewModelScope.launch {
+            delay(if (attempt == 0) 3500 else 1400)
+            rcClient.requestStatus(ip) { result ->
+                result.onSuccess { json ->
+                    val actual = json.optString("fw")
+                    if (actual == expectedVersion) {
+                        settings.lastFirmwareVersion = actual
+                        _wifiStatus.value = json
+                        _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                            stage = FirmwareUpdateUiState.Stage.SUCCESS,
+                            progress = 100,
+                            message = "펌웨어 v$actual 부팅 확인 완료"
+                        )
+                    } else if (attempt < 5) {
+                        verifyFirmwareAfterOta(ip, expectedVersion, attempt + 1)
+                    } else {
+                        _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                            stage = FirmwareUpdateUiState.Stage.REBOOTING,
+                            progress = 100,
+                            message = "전송은 완료됐지만 실행 버전 확인 실패 · Bluetooth 재연결 후 FW v$expectedVersion 확인 필요"
+                        )
+                    }
+                }.onFailure {
+                    if (attempt < 5) {
+                        verifyFirmwareAfterOta(ip, expectedVersion, attempt + 1)
+                    } else {
+                        _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                            stage = FirmwareUpdateUiState.Stage.REBOOTING,
+                            progress = 100,
+                            message = "전송은 완료됐지만 재부팅 후 장치에 다시 닿지 않음 · Bluetooth 재연결로 v$expectedVersion 확인 필요"
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private fun readBundledFirmwareVersion(): String = runCatching {

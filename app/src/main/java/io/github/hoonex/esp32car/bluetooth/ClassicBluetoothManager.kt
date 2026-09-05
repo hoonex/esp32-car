@@ -16,6 +16,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +31,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
@@ -42,11 +45,22 @@ class ClassicBluetoothManager(context: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val writeMutex = Mutex()
-    private var socket: BluetoothSocket? = null
-    private var outputStream: OutputStream? = null
-    private var reader: BufferedReader? = null
+    private val generation = AtomicLong(0L)
+
+    @Volatile private var connectingSocket: BluetoothSocket? = null
+    @Volatile private var socket: BluetoothSocket? = null
+    @Volatile private var outputStream: OutputStream? = null
+    @Volatile private var reader: BufferedReader? = null
     private var connectJob: Job? = null
     private var listenJob: Job? = null
+    private var handshakeJob: Job? = null
+
+    private data class PendingCommand(val generation: Long, val command: String)
+    private val driveCommands = Channel<PendingCommand>(Channel.CONFLATED)
+    private val controlCommands = Channel<PendingCommand>(
+        capacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     private val discoveredByAddress = linkedMapOf<String, BluetoothDevice>()
     private var pendingBondAddress: String? = null
@@ -60,6 +74,9 @@ class ClassicBluetoothManager(context: Context) {
 
     private val _connectedDeviceAddress = MutableStateFlow<String?>(null)
     val connectedDeviceAddress: StateFlow<String?> = _connectedDeviceAddress.asStateFlow()
+
+    private val _linkVerified = MutableStateFlow(false)
+    val linkVerified: StateFlow<Boolean> = _linkVerified.asStateFlow()
 
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
@@ -90,6 +107,9 @@ class ClassicBluetoothManager(context: Context) {
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val PREF_LAST_ADDRESS = "last_device_address"
         private const val DEFAULT_DEVICE_NAME = "ESP32_CAM_RC"
+        private const val EXPECTED_PROFILE = "AI_THINKER_ESP32_CAM_2WD_L298N"
+        private const val EXPECTED_PROTOCOL = 2
+        private const val HANDSHAKE_TIMEOUT_MS = 3500L
     }
 
     private val discoveryReceiver = object : BroadcastReceiver() {
@@ -144,6 +164,8 @@ class ClassicBluetoothManager(context: Context) {
 
     init {
         registerDiscoveryReceiver()
+        scope.launch { for (pending in driveCommands) writePending(pending) }
+        scope.launch { for (pending in controlCommands) writePending(pending) }
     }
 
     fun isBluetoothAvailable(): Boolean = bluetoothAdapter != null
@@ -157,21 +179,16 @@ class ClassicBluetoothManager(context: Context) {
                 compareByDescending<BluetoothDevice> {
                     runCatching { it.name }.getOrNull()?.equals(DEFAULT_DEVICE_NAME, true) == true
                 }.thenBy { runCatching { it.name }.getOrNull().orEmpty() }
-            )
-            ?: emptyList()
+            ) ?: emptyList()
     }.getOrDefault(emptyList())
 
     fun lastDeviceAddress(): String? = prefs.getString(PREF_LAST_ADDRESS, null)
 
-    /**
-     * Kept for API compatibility with older callers. Connection is intentionally manual now:
-     * this only opens discovery and never pairs/connects a device by itself.
-     */
+    /** Legacy API: discovery only. Bluetooth connection remains explicitly user initiated. */
     fun connectPreferredOrDiscover(preferredName: String = DEFAULT_DEVICE_NAME) {
         startDiscovery(preferredName)
     }
 
-    /** Starts discovery only. A discovered device must be tapped by the user to pair/connect. */
     fun startDiscovery(preferredName: String? = null) {
         if (!isBluetoothAvailable()) {
             _lastError.value = "이 기기는 Bluetooth를 지원하지 않습니다."
@@ -225,7 +242,6 @@ class ClassicBluetoothManager(context: Context) {
                 val started = runCatching { device.createBond() }.getOrDefault(false)
                 if (!started) {
                     pendingBondAddress = null
-                    // Some ESP32 SPP implementations trigger pairing from RFCOMM itself.
                     connectToDevice(device)
                 }
             }
@@ -251,13 +267,11 @@ class ClassicBluetoothManager(context: Context) {
         val name = runCatching { device.name }.getOrNull() ?: address
 
         stopDiscovery()
-        connectJob?.cancel()
-        connectJob = null
-        listenJob?.cancel()
-        listenJob = null
-        closeSocketOnly()
+        val myGeneration = generation.incrementAndGet()
+        cancelConnectionJobsAndSockets()
 
         _connectionState.value = ConnectionState.CONNECTING
+        _linkVerified.value = false
         _lastError.value = null
         _connectedDeviceName.value = name
         _connectedDeviceAddress.value = address
@@ -265,80 +279,132 @@ class ClassicBluetoothManager(context: Context) {
         connectJob = scope.launch {
             try {
                 bluetoothAdapter?.cancelDiscovery()
-                val newSocket = connectRfcomm(device)
-                socket = newSocket
-                outputStream = newSocket.outputStream
-                reader = BufferedReader(InputStreamReader(newSocket.inputStream, Charsets.UTF_8))
+                val newSocket = connectRfcomm(device, myGeneration)
+                if (generation.get() != myGeneration) {
+                    runCatching { newSocket.close() }
+                    return@launch
+                }
 
-                prefs.edit().putString(PREF_LAST_ADDRESS, address).apply()
-                _connectionState.value = ConnectionState.CONNECTED
-                _lastError.value = null
-                startListening()
-                sendCommand("STATUS")
+                val newOutput = newSocket.outputStream
+                val newReader = BufferedReader(InputStreamReader(newSocket.inputStream, Charsets.UTF_8))
+                socket = newSocket
+                outputStream = newOutput
+                reader = newReader
+                connectingSocket = null
+
+                startListening(myGeneration, newSocket, newReader)
+                enqueueControl("STATUS", myGeneration)
+
+                handshakeJob?.cancel()
+                handshakeJob = scope.launch {
+                    delay(HANDSHAKE_TIMEOUT_MS)
+                    if (generation.get() == myGeneration && !_linkVerified.value) {
+                        _lastError.value = "ESP32 응답 확인 실패: 연결은 열렸지만 STATUS handshake가 오지 않았습니다."
+                        disconnectGeneration(myGeneration, clearIdentity = false)
+                    }
+                }
             } catch (t: Throwable) {
-                val reason = t.message?.takeIf { it.isNotBlank() } ?: t.javaClass.simpleName
-                markDisconnected(clearIdentity = false)
-                _lastError.value = "Bluetooth 연결 실패: $reason"
+                if (generation.get() == myGeneration) {
+                    val reason = t.message?.takeIf { it.isNotBlank() } ?: t.javaClass.simpleName
+                    _lastError.value = "Bluetooth 연결 실패: $reason"
+                    disconnectGeneration(myGeneration, clearIdentity = false)
+                }
             } finally {
-                connectJob = null
+                if (generation.get() == myGeneration) connectJob = null
             }
         }
     }
 
-    private fun connectRfcomm(device: BluetoothDevice): BluetoothSocket {
+    private fun connectRfcomm(device: BluetoothDevice, myGeneration: Long): BluetoothSocket {
+        fun connect(candidate: BluetoothSocket): BluetoothSocket {
+            if (generation.get() != myGeneration) {
+                runCatching { candidate.close() }
+                error("Connection cancelled")
+            }
+            connectingSocket = candidate
+            candidate.connect()
+            if (generation.get() != myGeneration) {
+                runCatching { candidate.close() }
+                error("Connection cancelled")
+            }
+            connectingSocket = null
+            return candidate
+        }
+
         val secure = device.createRfcommSocketToServiceRecord(SPP_UUID)
         try {
-            secure.connect()
-            return secure
+            return connect(secure)
         } catch (first: Throwable) {
             runCatching { secure.close() }
+            if (generation.get() != myGeneration) throw first
             val insecure = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
             try {
-                insecure.connect()
-                return insecure
+                return connect(insecure)
             } catch (second: Throwable) {
                 runCatching { insecure.close() }
                 second.addSuppressed(first)
                 throw second
             }
+        } finally {
+            if (connectingSocket === secure) connectingSocket = null
         }
     }
 
-    private fun startListening() {
+    private fun startListening(myGeneration: Long, localSocket: BluetoothSocket, localReader: BufferedReader) {
         listenJob?.cancel()
         listenJob = scope.launch {
             var lostLink = false
             try {
-                while (_connectionState.value == ConnectionState.CONNECTED) {
-                    val line = reader?.readLine() ?: run {
+                while (generation.get() == myGeneration && socket === localSocket) {
+                    val line = localReader.readLine() ?: run {
                         lostLink = true
                         break
                     }
-                    processReceivedLine(line.trim())
+                    processReceivedLine(line.trim(), myGeneration)
                 }
             } catch (t: Throwable) {
-                if (_connectionState.value == ConnectionState.CONNECTED) {
+                if (generation.get() == myGeneration && socket === localSocket) {
                     lostLink = true
                     _lastError.value = "Bluetooth 연결이 끊겼습니다: ${t.message ?: t.javaClass.simpleName}"
                 }
             } finally {
-                if (_connectionState.value == ConnectionState.CONNECTED || lostLink) {
-                    markDisconnected(clearIdentity = false)
+                if (generation.get() == myGeneration && socket === localSocket && lostLink) {
+                    disconnectGeneration(myGeneration, clearIdentity = false)
                 }
-                listenJob = null
+                if (generation.get() == myGeneration) listenJob = null
             }
         }
     }
 
-    private fun processReceivedLine(line: String) {
-        if (line.isBlank()) return
+    private fun processReceivedLine(line: String, myGeneration: Long) {
+        if (line.isBlank() || generation.get() != myGeneration) return
 
         if (line.startsWith("{")) {
-            runCatching { JSONObject(line) }.getOrNull()?.let { json ->
-                _btStatusResponse.value = json
-                json.optString("ssid").takeIf { it.isNotBlank() }?.let { _wifiProvisionedSsid.value = it }
-                json.optString("ip").takeIf { it.isNotBlank() }?.let { _wifiConnectedIp.value = it }
+            val json = runCatching { JSONObject(line) }.getOrNull() ?: return
+            val profile = json.optString("profile")
+            val board = json.optString("board")
+            val protocol = json.optInt("protocol", -1)
+            if (profile != EXPECTED_PROFILE) {
+                _lastError.value = "호환되지 않는 SPP 기기입니다: ${profile.ifBlank { board.ifBlank { "STATUS profile 없음" } }}"
+                disconnectGeneration(myGeneration, clearIdentity = false)
+                return
             }
+            if (protocol != EXPECTED_PROTOCOL) {
+                _lastError.value = "펌웨어 protocol 불일치: P$protocol · 필요한 버전 P$EXPECTED_PROTOCOL (FW 3.3.0을 설치하세요)."
+                disconnectGeneration(myGeneration, clearIdentity = false)
+                return
+            }
+
+            _btStatusResponse.value = json
+            json.optString("ssid").takeIf { it.isNotBlank() }?.let { _wifiProvisionedSsid.value = it }
+            json.optString("ip").takeIf { it.isNotBlank() }?.let { _wifiConnectedIp.value = it }
+            _connectedDeviceAddress.value?.takeIf { it.isNotBlank() }?.let { verifiedAddress ->
+                prefs.edit().putString(PREF_LAST_ADDRESS, verifiedAddress).apply()
+            }
+            _linkVerified.value = true
+            _connectionState.value = ConnectionState.CONNECTED
+            handshakeJob?.cancel()
+            handshakeJob = null
             return
         }
 
@@ -367,20 +433,43 @@ class ClassicBluetoothManager(context: Context) {
         }
     }
 
+    /**
+     * Drive commands are conflated: if Bluetooth stalls, only the newest motion command survives.
+     * This prevents stale joystick packets from being replayed after congestion. Configuration and
+     * status commands keep FIFO ordering in a small bounded queue.
+     */
     fun sendCommand(command: String) {
-        if (_connectionState.value != ConnectionState.CONNECTED) return
+        if (_connectionState.value != ConnectionState.CONNECTED || !_linkVerified.value) return
         val normalized = command.trimEnd('\r', '\n')
+        val myGeneration = generation.get()
+        if (isDriveCommand(normalized)) {
+            driveCommands.trySend(PendingCommand(myGeneration, normalized))
+        } else {
+            controlCommands.trySend(PendingCommand(myGeneration, normalized))
+        }
+    }
 
-        scope.launch {
-            try {
-                writeMutex.withLock {
-                    val out = outputStream ?: error("Bluetooth output stream unavailable")
-                    out.write((normalized + "\n").toByteArray(Charsets.UTF_8))
-                    out.flush()
-                }
-            } catch (t: Throwable) {
+    private fun enqueueControl(command: String, myGeneration: Long) {
+        controlCommands.trySend(PendingCommand(myGeneration, command.trimEnd('\r', '\n')))
+    }
+
+    private fun isDriveCommand(command: String): Boolean =
+        command.startsWith("M:") || command == "F" || command == "B" ||
+            command == "L" || command == "R" || command == "S"
+
+    private suspend fun writePending(pending: PendingCommand) {
+        if (pending.generation != generation.get()) return
+        try {
+            writeMutex.withLock {
+                if (pending.generation != generation.get()) return@withLock
+                val out = outputStream ?: return@withLock
+                out.write((pending.command + "\n").toByteArray(Charsets.UTF_8))
+                out.flush()
+            }
+        } catch (t: Throwable) {
+            if (pending.generation == generation.get()) {
                 _lastError.value = "Bluetooth 전송 실패: ${t.message ?: t.javaClass.simpleName}"
-                markDisconnected(clearIdentity = false)
+                disconnectGeneration(pending.generation, clearIdentity = false)
             }
         }
     }
@@ -392,29 +481,50 @@ class ClassicBluetoothManager(context: Context) {
     fun disconnect(clearIdentity: Boolean = true) {
         stopDiscovery()
         pendingBondAddress = null
-        connectJob?.cancel()
-        connectJob = null
-        listenJob?.cancel()
-        listenJob = null
-        markDisconnected(clearIdentity)
-    }
-
-    private fun markDisconnected(clearIdentity: Boolean) {
-        closeSocketOnly()
+        generation.incrementAndGet()
+        cancelConnectionJobsAndSockets()
         _connectionState.value = ConnectionState.DISCONNECTED
+        _linkVerified.value = false
         if (clearIdentity) {
             _connectedDeviceName.value = null
             _connectedDeviceAddress.value = null
         }
     }
 
+    private fun disconnectGeneration(myGeneration: Long, clearIdentity: Boolean) {
+        if (generation.get() != myGeneration) return
+        generation.incrementAndGet()
+        cancelConnectionJobsAndSockets()
+        _connectionState.value = ConnectionState.DISCONNECTED
+        _linkVerified.value = false
+        if (clearIdentity) {
+            _connectedDeviceName.value = null
+            _connectedDeviceAddress.value = null
+        }
+    }
+
+    private fun cancelConnectionJobsAndSockets() {
+        handshakeJob?.cancel()
+        handshakeJob = null
+        connectJob?.cancel()
+        connectJob = null
+        listenJob?.cancel()
+        listenJob = null
+        runCatching { connectingSocket?.close() }
+        connectingSocket = null
+        closeSocketOnly()
+    }
+
     private fun closeSocketOnly() {
-        runCatching { reader?.close() }
-        runCatching { outputStream?.close() }
-        runCatching { socket?.close() }
+        val localReader = reader
+        val localOutput = outputStream
+        val localSocket = socket
         reader = null
         outputStream = null
         socket = null
+        runCatching { localReader?.close() }
+        runCatching { localOutput?.close() }
+        runCatching { localSocket?.close() }
     }
 
     private fun publishDiscovered() {
@@ -458,6 +568,8 @@ class ClassicBluetoothManager(context: Context) {
 
     fun close() {
         disconnect()
+        driveCommands.close()
+        controlCommands.close()
         if (receiverRegistered) {
             runCatching { appContext.unregisterReceiver(discoveryReceiver) }
             receiverRegistered = false
