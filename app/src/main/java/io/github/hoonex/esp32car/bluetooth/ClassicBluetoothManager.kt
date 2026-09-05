@@ -34,7 +34,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 
-enum class ConnectionState { DISCONNECTED, CONNECTING, LEGACY_UPGRADE, CONNECTED }
+enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
 
 @SuppressLint("MissingPermission")
 class ClassicBluetoothManager(context: Context) {
@@ -408,7 +408,6 @@ class ClassicBluetoothManager(context: Context) {
                 json.optString("ssid").takeIf { it.isNotBlank() }?.let { _wifiProvisionedSsid.value = it }
                 json.optString("ip").takeIf { it.isNotBlank() && it != "0.0.0.0" }?.let { _wifiConnectedIp.value = it }
                 _legacyUpgradeAvailable.value = true
-                _connectionState.value = ConnectionState.LEGACY_UPGRADE
                 _lastError.value = null
                 handshakeJob?.cancel()
                 handshakeJob = null
@@ -472,7 +471,7 @@ class ClassicBluetoothManager(context: Context) {
 
     /** Only the minimal non-driving commands needed to migrate known firmware 3.2.x are allowed. */
     fun sendLegacyUpgradeCommand(command: String) {
-        if (_connectionState.value != ConnectionState.LEGACY_UPGRADE || !_legacyUpgradeAvailable.value) return
+        if (!_legacyUpgradeAvailable.value || socket == null || outputStream == null) return
         val normalized = command.trimEnd('\r', '\n')
         if (normalized != "U" && normalized != "STATUS") return
         enqueueControl(normalized, generation.get())
