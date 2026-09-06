@@ -1,5 +1,6 @@
 package io.github.hoonex.esp32car.network
 
+import android.net.Network
 import android.util.Log
 import okhttp3.Call
 import okhttp3.Callback
@@ -13,7 +14,9 @@ import okhttp3.Response
 import okio.BufferedSink
 import org.json.JSONObject
 import java.io.IOException
+import java.net.InetAddress
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.SocketFactory
 
@@ -53,6 +56,8 @@ class RCClient {
     @Volatile var motorTrim: Int = 0
     @Volatile var controlKey: String = ""
     @Volatile var networkSocketFactoryOverride: SocketFactory? = null
+    @Volatile var recoveryNetwork: Network? = null
+    @Volatile var recoveryLocalAddress: InetAddress? = null
 
     fun sendLight(ip: String, lightValue: Int) {
         requestAction(ip, "light" to lightValue.coerceIn(0, 255).toString(), slot = lightCall, label = "light")
@@ -206,6 +211,7 @@ class RCClient {
             return
         }
 
+        val httpBytesSent = AtomicLong(0)
         val body = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaType()
             override fun contentLength(): Long = firmware.size.toLong()
@@ -217,6 +223,7 @@ class RCClient {
                     val count = minOf(chunk, firmware.size - offset)
                     sink.write(firmware, offset, count)
                     offset += count
+                    httpBytesSent.set(offset.toLong())
                     onProgress(offset.toLong(), firmware.size.toLong())
                 }
             }
@@ -232,7 +239,50 @@ class RCClient {
         otaCall.getAndSet(call)?.cancel()
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (!call.isCanceled()) callback(Result.failure(e))
+                if (call.isCanceled()) return
+                if (httpBytesSent.get() > 0L) {
+                    callback(Result.failure(e))
+                    return
+                }
+
+                val network = recoveryNetwork
+                val localAddress = recoveryLocalAddress
+                if (network == null || localAddress == null) {
+                    callback(Result.failure(e))
+                    return
+                }
+
+                Thread({
+                    val fallback = ArduinoOtaClient.upload(
+                        network = network,
+                        localAddress = localAddress,
+                        remoteHost = ip.substringBefore(':'),
+                        firmware = firmware,
+                        password = otaKey,
+                        onProgress = onProgress
+                    )
+                    fallback
+                        .onSuccess {
+                            callback(
+                                Result.success(
+                                    JSONObject()
+                                        .put("ok", true)
+                                        .put("transport", "arduinoota")
+                                        .put("rebooting", true)
+                                )
+                            )
+                        }
+                        .onFailure { fallbackError ->
+                            callback(
+                                Result.failure(
+                                    IOException(
+                                        "HTTP :80 unavailable and ArduinoOTA fallback failed: ${fallbackError.message}",
+                                        fallbackError
+                                    )
+                                )
+                            )
+                        }
+                }, "esp32-legacy-arduinoota").start()
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -252,6 +302,8 @@ class RCClient {
 
     fun close() {
         networkSocketFactoryOverride = null
+        recoveryNetwork = null
+        recoveryLocalAddress = null
         driveCall.getAndSet(null)?.cancel()
         lightCall.getAndSet(null)?.cancel()
         configCall.getAndSet(null)?.cancel()

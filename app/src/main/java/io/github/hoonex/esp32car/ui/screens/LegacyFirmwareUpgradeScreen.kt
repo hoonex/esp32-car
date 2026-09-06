@@ -53,6 +53,7 @@ import io.github.hoonex.esp32car.viewmodel.FirmwareUpdateUiState
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.net.Inet4Address
 
 private val LegacyBg = Color(0xFF070A0E)
 private val LegacyPanel = Color(0xF20E141B)
@@ -75,6 +76,7 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
     val connectedName by viewModel.bluetooth.connectedDeviceName.collectAsStateWithLifecycle()
     var probeInFlight by remember { mutableStateOf(false) }
     var routeError by remember { mutableStateOf<String?>(null) }
+    var recoveryRouteReady by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose { clearRecoveryRoute(context, viewModel) }
@@ -87,14 +89,18 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
     }
 
     val legacyVersion = status?.optString("fw").orEmpty().ifBlank { "3.2.x" }
+    val targetVersion = update.bundledVersion.takeUnless { it.isBlank() || it == "unknown" } ?: "3.3.0"
     val keyReady = status?.optString("ota_key").orEmpty().isNotBlank() || viewModel.settings.otaKey.isNotBlank()
     val recoveryApRequested = recoveryIp == RecoveryIp
     val recoveryReachable = wifiStatus?.optString("fw").orEmpty().startsWith("3.2.")
+    val directOtaReady = recoveryRouteReady && wifiError != null && routeError == null && keyReady
+    val migrationPathReady = recoveryReachable || directOtaReady
     val updateBusy = update.stage == FirmwareUpdateUiState.Stage.PREPARING ||
         update.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
         update.stage == FirmwareUpdateUiState.Stage.REBOOTING
     val probeDetail = when {
-        recoveryReachable -> "FW v${wifiStatus?.optString("fw")} 응답 확인됨"
+        recoveryReachable -> "FW v${wifiStatus?.optString("fw")} HTTP 응답 확인됨"
+        directOtaReady -> "HTTP :80 미응답 · ArduinoOTA 3232 직접 설치 사용 가능"
         probeInFlight -> "ESP32 복구 Wi-Fi로 192.168.4.1 확인 중"
         routeError != null -> routeError!!
         wifiError != null -> wifiError!!
@@ -128,7 +134,7 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
 
                     Text("펌웨어 업데이트 필요", color = Color.White, fontSize = if (compact) 25.sp else 36.sp, fontWeight = FontWeight.Black)
                     Text(
-                        "$connectedName · FW v$legacyVersion\nBluetooth는 정상적으로 열렸고, 이 버전은 앱 OTA로 v3.3.0까지 올릴 수 있습니다.",
+                        "$connectedName · FW v$legacyVersion\nBluetooth는 정상적으로 열렸고, 이 버전은 앱 OTA로 v${targetVersion}까지 올릴 수 있습니다.",
                         color = LegacyMuted,
                         fontSize = if (compact) 10.sp else 13.sp,
                         lineHeight = if (compact) 14.sp else 18.sp
@@ -163,14 +169,15 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                         .padding(if (compact) 14.dp else 20.dp),
                     verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)
                 ) {
-                    Text("USB 없이 v3.3.0 설치", color = Color.White, fontSize = if (compact) 16.sp else 21.sp, fontWeight = FontWeight.Black)
-                    Text("한 번만 복구 Wi-Fi에 연결하면 APK 안에 포함된 최신 펌웨어를 ESP32가 직접 받아 설치합니다.", color = LegacyMuted, fontSize = 9.sp)
+                    Text("USB 없이 v$targetVersion 설치", color = Color.White, fontSize = if (compact) 16.sp else 21.sp, fontWeight = FontWeight.Black)
+                    Text("복구 Wi-Fi의 HTTP가 닫혀 있어도 ArduinoOTA 포트로 APK 안의 펌웨어를 직접 전송할 수 있습니다.", color = LegacyMuted, fontSize = 9.sp)
 
                     StepCard("1", "업데이트 Wi-Fi 열기", "ESP32-CAR-UPDATE / 비밀번호 esp32car", recoveryApRequested) {
                         Button(
                             onClick = {
                                 routeError = null
                                 probeInFlight = false
+                                recoveryRouteReady = false
                                 clearRecoveryRoute(context, viewModel)
                                 viewModel.updateIp(RecoveryIp)
                                 viewModel.bluetooth.sendLegacyUpgradeCommand("U")
@@ -192,16 +199,17 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                         "2",
                         "ESP32-CAR-UPDATE 연결 확인",
                         probeDetail,
-                        recoveryReachable
+                        migrationPathReady
                     ) {
                         OutlinedButton(
                             onClick = {
                                 routeError = null
                                 probeInFlight = true
                                 viewModel.updateIp(RecoveryIp)
-                                if (!routeRecoveryWifi(context, viewModel)) {
+                                recoveryRouteReady = routeRecoveryWifi(context, viewModel)
+                                if (!recoveryRouteReady) {
                                     probeInFlight = false
-                                    routeError = "Android가 연결된 Wi-Fi를 앱에 노출하지 않았습니다. ESP32-CAR-UPDATE 연결을 유지한 채 다시 눌러주세요."
+                                    routeError = "ESP32-CAR-UPDATE의 로컬 IPv4 경로를 찾지 못했습니다. Wi-Fi 연결을 유지한 채 다시 눌러주세요."
                                     return@OutlinedButton
                                 }
                                 viewModel.refreshWifiStatus()
@@ -213,13 +221,21 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                             Spacer(Modifier.width(7.dp))
                             Text(if (probeInFlight) "확인 중..." else "연결 확인", fontSize = 10.sp)
                         }
-                        (routeError ?: wifiError)?.let { Text(it, color = LegacyDanger, fontSize = 8.sp) }
+                        when {
+                            directOtaReady -> Text(
+                                "포트 80은 닫혀 있지만 업데이트 포트 3232로 우회합니다.",
+                                color = LegacyAccent,
+                                fontSize = 8.sp
+                            )
+                            routeError != null -> Text(routeError!!, color = LegacyDanger, fontSize = 8.sp)
+                            wifiError != null -> Text(wifiError!!, color = LegacyDanger, fontSize = 8.sp)
+                        }
                     }
 
                     StepCard(
                         "3",
-                        "v3.3.0 설치",
-                        "업로드 후 재부팅된 실제 FW 버전까지 확인",
+                        "v$targetVersion 설치",
+                        if (directOtaReady) "ArduinoOTA 3232 직접 전송 후 재부팅 확인" else "업로드 후 재부팅된 실제 FW 버전까지 확인",
                         update.stage == FirmwareUpdateUiState.Stage.SUCCESS
                     ) {
                         if (updateBusy || update.stage == FirmwareUpdateUiState.Stage.SUCCESS || update.stage == FirmwareUpdateUiState.Stage.ERROR) {
@@ -241,19 +257,20 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                         Button(
                             onClick = {
                                 routeError = null
-                                if (!routeRecoveryWifi(context, viewModel)) {
+                                recoveryRouteReady = routeRecoveryWifi(context, viewModel)
+                                if (!recoveryRouteReady) {
                                     routeError = "복구 Wi-Fi 연결이 끊겼습니다. ESP32-CAR-UPDATE에 다시 연결한 뒤 설치하세요."
                                     return@Button
                                 }
                                 viewModel.updateFirmwareFromBundled()
                             },
-                            enabled = recoveryReachable && keyReady && !updateBusy && update.stage != FirmwareUpdateUiState.Stage.SUCCESS,
+                            enabled = migrationPathReady && keyReady && !updateBusy && update.stage != FirmwareUpdateUiState.Stage.SUCCESS,
                             colors = ButtonDefaults.buttonColors(containerColor = LegacyGood, contentColor = Color(0xFF062218)),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Default.SystemUpdate, null)
                             Spacer(Modifier.width(7.dp))
-                            Text("최신 펌웨어 설치", fontSize = 10.sp, fontWeight = FontWeight.Black)
+                            Text(if (directOtaReady) "ArduinoOTA로 최신 펌웨어 설치" else "최신 펌웨어 설치", fontSize = 10.sp, fontWeight = FontWeight.Black)
                         }
                     }
                 }
@@ -265,8 +282,15 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
 private fun routeRecoveryWifi(context: Context, viewModel: RcViewModel): Boolean {
     val manager = context.getSystemService(ConnectivityManager::class.java) ?: return false
     val recoveryNetwork = findRecoveryWifiNetwork(manager) ?: return false
+    val localAddress = manager.getLinkProperties(recoveryNetwork)
+        ?.linkAddresses
+        ?.map { it.address }
+        ?.filterIsInstance<Inet4Address>()
+        ?.firstOrNull() ?: return false
 
     viewModel.rcClient.networkSocketFactoryOverride = recoveryNetwork.socketFactory
+    viewModel.rcClient.recoveryNetwork = recoveryNetwork
+    viewModel.rcClient.recoveryLocalAddress = localAddress
     runCatching { manager.bindProcessToNetwork(recoveryNetwork) }
     return true
 }
@@ -286,6 +310,8 @@ private fun findRecoveryWifiNetwork(manager: ConnectivityManager): Network? {
 
 private fun clearRecoveryRoute(context: Context, viewModel: RcViewModel) {
     viewModel.rcClient.networkSocketFactoryOverride = null
+    viewModel.rcClient.recoveryNetwork = null
+    viewModel.rcClient.recoveryLocalAddress = null
     val manager = context.getSystemService(ConnectivityManager::class.java) ?: return
     runCatching { manager.bindProcessToNetwork(null) }
 }
