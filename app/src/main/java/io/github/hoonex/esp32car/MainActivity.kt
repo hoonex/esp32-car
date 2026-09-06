@@ -102,6 +102,11 @@ private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     val context = LocalContext.current
 
     fun requiredPermissions(): Array<String> = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        )
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT
@@ -138,10 +143,10 @@ private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("BLUETOOTH PERMISSION", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
+                Text("BLUETOOTH / LOCAL NETWORK PERMISSION", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
                 Text(
-                    if (requestedOnce) "Nearby devices 권한이 꺼져 있어 ESP32_CAM_RC를 검색할 수 없습니다."
-                    else "ESP32_CAM_RC를 직접 검색하고 연결하려면 Nearby devices 권한이 필요합니다.",
+                    if (requestedOnce) "Nearby devices 권한이 꺼져 있어 ESP32_CAM_RC 및 로컬 OTA 통신을 사용할 수 없습니다."
+                    else "ESP32_CAM_RC 검색과 로컬 OTA 통신에는 Nearby devices 권한이 필요합니다.",
                     color = Color(0xFF9AA5AF),
                     fontSize = 12.sp
                 )
