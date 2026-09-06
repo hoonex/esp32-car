@@ -257,7 +257,7 @@ object AppUpdater {
 
         when (compareVersions(newest.version, currentVersion)) {
             -1 -> error(
-                "공식 자동업데이트 채널은 v${newest.version}까지 게시되어 있지만 현재 앱은 v$currentVersion입니다. " +
+                "공식 자동업데이트 채널은 v${newest.version}까지 게시되어 있지만 현재 앱은 v${currentVersion}입니다. " +
                     "이 설치본은 릴리즈보다 앞선 테스트 빌드입니다."
             )
             0 -> return null
