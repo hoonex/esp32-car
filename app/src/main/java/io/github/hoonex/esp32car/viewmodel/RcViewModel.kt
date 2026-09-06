@@ -68,6 +68,12 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     )
     val firmwareUpdate: StateFlow<FirmwareUpdateUiState> = _firmwareUpdate.asStateFlow()
 
+    private val _legacyMigrationSession = MutableStateFlow(false)
+    val legacyMigrationSession: StateFlow<Boolean> = _legacyMigrationSession.asStateFlow()
+
+    private var lastRequestedDevice: BluetoothDevice? = null
+    private var migrationExpectedVersion: String? = null
+
     init {
         viewModelScope.launch {
             bluetooth.connectionState.collect { state ->
@@ -103,6 +109,24 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                 if (status.has("invert_left")) settings.invertLeftMotor = status.optBoolean("invert_left")
                 if (status.has("invert_right")) settings.invertRightMotor = status.optBoolean("invert_right")
                 if (status.has("stream_fps")) settings.streamFps = status.optInt("stream_fps", settings.streamFps.toInt()).toFloat()
+
+                val expected = migrationExpectedVersion
+                val actual = status.optString("fw")
+                if (
+                    expected != null &&
+                    _legacyMigrationSession.value &&
+                    _firmwareUpdate.value.stage == FirmwareUpdateUiState.Stage.REBOOTING &&
+                    actual == expected &&
+                    status.optInt("protocol", 1) >= 2
+                ) {
+                    _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                        stage = FirmwareUpdateUiState.Stage.SUCCESS,
+                        progress = 100,
+                        message = "펌웨어 v$actual Bluetooth 부팅 확인 완료"
+                    )
+                    _legacyMigrationSession.value = false
+                    migrationExpectedVersion = null
+                }
             }
         }
     }
@@ -115,12 +139,39 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun pairedDevices(): List<BluetoothDevice> = bluetooth.getPairedDevices()
-    fun connect(device: BluetoothDevice) = bluetooth.connectToDevice(device)
-    fun pairAndConnect(device: BluetoothDevice) = bluetooth.pairAndConnect(device)
+
+    fun connect(device: BluetoothDevice) {
+        lastRequestedDevice = device
+        bluetooth.connectToDevice(device)
+    }
+
+    fun pairAndConnect(device: BluetoothDevice) {
+        lastRequestedDevice = device
+        bluetooth.pairAndConnect(device)
+    }
+
     fun scanBluetooth() = bluetooth.startDiscovery(RcProtocol.DEVICE_NAME)
     fun stopBluetoothScan() = bluetooth.stopDiscovery()
-    fun reconnectLast(): Boolean = bluetooth.reconnectLastDevice()
-    fun disconnectBluetooth() = bluetooth.disconnect()
+
+    fun reconnectLast(): Boolean {
+        val remembered = lastRequestedDevice
+        if (remembered != null) {
+            bluetooth.connectToDevice(remembered)
+            return true
+        }
+        return bluetooth.reconnectLastDevice()
+    }
+
+    fun disconnectBluetooth() {
+        val busy = _firmwareUpdate.value.stage == FirmwareUpdateUiState.Stage.PREPARING ||
+            _firmwareUpdate.value.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
+            _firmwareUpdate.value.stage == FirmwareUpdateUiState.Stage.REBOOTING
+        if (!busy) {
+            _legacyMigrationSession.value = false
+            migrationExpectedVersion = null
+        }
+        bluetooth.disconnect()
+    }
 
     fun isControlLinkReady(): Boolean = when (_transportMode.value) {
         TransportMode.BLUETOOTH -> bluetooth.connectionState.value == ConnectionState.CONNECTED && bluetooth.linkVerified.value
@@ -348,6 +399,9 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val legacyMigration = bluetooth.legacyUpgradeAvailable.value
+        if (legacyMigration) _legacyMigrationSession.value = true
+
         emergencyStop()
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
             stage = FirmwareUpdateUiState.Stage.PREPARING,
@@ -361,6 +415,8 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     failFirmwareUpdate(it.message ?: "번들 펌웨어 검증 실패")
                     return@launch
                 }
+
+            migrationExpectedVersion = if (legacyMigration) bundle.version else null
 
             rcClient.uploadFirmware(
                 ip = ip,
@@ -379,10 +435,15 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     _firmwareUpdate.value = _firmwareUpdate.value.copy(
                         stage = FirmwareUpdateUiState.Stage.REBOOTING,
                         progress = 100,
-                        message = "플래시 전송 완료 · v${bundle.version} 재부팅 검증 중"
+                        message = if (legacyMigration) {
+                            "플래시 전송 완료 · v${bundle.version} Wi-Fi/Bluetooth 부팅 검증 중"
+                        } else {
+                            "플래시 전송 완료 · v${bundle.version} 재부팅 검증 중"
+                        }
                     )
-                    verifyFirmwareAfterOta(ip, bundle.version, attempt = 0)
+                    verifyFirmwareAfterOta(ip, bundle.version, attempt = 0, legacyMigration = legacyMigration)
                 }.onFailure {
+                    migrationExpectedVersion = null
                     failFirmwareUpdate(it.message ?: "펌웨어 업데이트 실패")
                 }
             }
@@ -395,6 +456,8 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             progress = 0,
             message = ""
         )
+        _legacyMigrationSession.value = false
+        migrationExpectedVersion = null
     }
 
     fun reloadTuningFromSettings() {
@@ -431,9 +494,33 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         BundledFirmware(bytes, version, actualSha)
     }
 
-    private fun verifyFirmwareAfterOta(ip: String, expectedVersion: String, attempt: Int) {
+    private fun verifyFirmwareAfterOta(
+        ip: String,
+        expectedVersion: String,
+        attempt: Int,
+        legacyMigration: Boolean
+    ) {
         viewModelScope.launch {
             delay(if (attempt == 0) 3500 else 1400)
+
+            if (
+                legacyMigration &&
+                attempt >= 1 &&
+                bluetooth.connectionState.value == ConnectionState.DISCONNECTED
+            ) {
+                val remembered = lastRequestedDevice
+                if (remembered != null) {
+                    _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                        stage = FirmwareUpdateUiState.Stage.REBOOTING,
+                        progress = 100,
+                        message = "Wi-Fi 재부팅 확인 중 · Bluetooth 자동 재연결도 시도 중"
+                    )
+                    bluetooth.connectToDevice(remembered)
+                } else if (attempt == 2) {
+                    reconnectLast()
+                }
+            }
+
             rcClient.requestStatus(ip) { result ->
                 result.onSuccess { json ->
                     val actual = json.optString("fw")
@@ -443,30 +530,37 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                         _firmwareUpdate.value = _firmwareUpdate.value.copy(
                             stage = FirmwareUpdateUiState.Stage.SUCCESS,
                             progress = 100,
-                            message = "펌웨어 v$actual 부팅 확인 완료"
+                            message = "펌웨어 v$actual Wi-Fi 부팅 확인 완료"
                         )
-                    } else if (attempt < 5) {
-                        verifyFirmwareAfterOta(ip, expectedVersion, attempt + 1)
+                        if (legacyMigration) _legacyMigrationSession.value = false
+                        migrationExpectedVersion = null
+                    } else if (attempt < 6) {
+                        verifyFirmwareAfterOta(ip, expectedVersion, attempt + 1, legacyMigration)
                     } else {
-                        _firmwareUpdate.value = _firmwareUpdate.value.copy(
-                            stage = FirmwareUpdateUiState.Stage.REBOOTING,
-                            progress = 100,
-                            message = "전송은 완료됐지만 실행 버전 확인 실패 · Bluetooth 재연결 후 FW v$expectedVersion 확인 필요"
-                        )
+                        finishFirmwareVerificationTimeout(expectedVersion, legacyMigration)
                     }
                 }.onFailure {
-                    if (attempt < 5) {
-                        verifyFirmwareAfterOta(ip, expectedVersion, attempt + 1)
+                    if (attempt < 6) {
+                        verifyFirmwareAfterOta(ip, expectedVersion, attempt + 1, legacyMigration)
                     } else {
-                        _firmwareUpdate.value = _firmwareUpdate.value.copy(
-                            stage = FirmwareUpdateUiState.Stage.REBOOTING,
-                            progress = 100,
-                            message = "전송은 완료됐지만 재부팅 후 장치에 다시 닿지 않음 · Bluetooth 재연결로 v$expectedVersion 확인 필요"
-                        )
+                        finishFirmwareVerificationTimeout(expectedVersion, legacyMigration)
                     }
                 }
             }
         }
+    }
+
+    private fun finishFirmwareVerificationTimeout(expectedVersion: String, legacyMigration: Boolean) {
+        if (_firmwareUpdate.value.stage == FirmwareUpdateUiState.Stage.SUCCESS) return
+        _firmwareUpdate.value = _firmwareUpdate.value.copy(
+            stage = FirmwareUpdateUiState.Stage.ERROR,
+            progress = 100,
+            message = if (legacyMigration) {
+                "전송은 완료됐지만 v$expectedVersion 부팅 확인 실패 · Bluetooth 자동 재연결도 확인되지 않았습니다. 전원을 유지한 채 다시 연결하세요."
+            } else {
+                "전송은 완료됐지만 v$expectedVersion 실행 버전을 확인하지 못했습니다."
+            }
+        )
     }
 
     private fun readBundledFirmwareVersion(): String = runCatching {

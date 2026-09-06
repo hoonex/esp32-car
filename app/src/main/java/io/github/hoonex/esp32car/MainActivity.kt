@@ -63,7 +63,8 @@ class MainActivity : ComponentActivity() {
             MyApplicationTheme {
                 BluetoothPermissionGate {
                     val legacyUpgradeAvailable by rcViewModel.bluetooth.legacyUpgradeAvailable.collectAsStateWithLifecycle()
-                    if (legacyUpgradeAvailable) {
+                    val legacyMigrationSession by rcViewModel.legacyMigrationSession.collectAsStateWithLifecycle()
+                    if (legacyUpgradeAvailable || legacyMigrationSession) {
                         LegacyFirmwareUpgradeScreen(rcViewModel)
                     } else {
                         ReliableCockpitScreen(rcViewModel)
