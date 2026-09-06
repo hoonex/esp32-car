@@ -15,6 +15,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.SocketFactory
 
 class RCClient {
     private val dispatcher = Dispatcher().apply {
@@ -51,6 +52,7 @@ class RCClient {
 
     @Volatile var motorTrim: Int = 0
     @Volatile var controlKey: String = ""
+    @Volatile var networkSocketFactoryOverride: SocketFactory? = null
 
     fun sendLight(ip: String, lightValue: Int) {
         requestAction(ip, "light" to lightValue.coerceIn(0, 255).toString(), slot = lightCall, label = "light")
@@ -136,7 +138,7 @@ class RCClient {
             }
 
             val url = urls[index]
-            val call = statusClient.newCall(authenticatedBuilder(url).build())
+            val call = routed(statusClient).newCall(authenticatedBuilder(url).build())
             statusCall.getAndSet(call)?.cancel()
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
@@ -226,7 +228,7 @@ class RCClient {
             .post(body)
             .build()
 
-        val call = otaClient.newCall(request)
+        val call = routed(otaClient).newCall(request)
         otaCall.getAndSet(call)?.cancel()
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -249,6 +251,7 @@ class RCClient {
     }
 
     fun close() {
+        networkSocketFactoryOverride = null
         driveCall.getAndSet(null)?.cancel()
         lightCall.getAndSet(null)?.cancel()
         configCall.getAndSet(null)?.cancel()
@@ -282,6 +285,13 @@ class RCClient {
             builder.header("X-ESP32-Control-Key", it)
         }
         return builder
+    }
+
+    private fun routed(base: OkHttpClient): OkHttpClient {
+        val socketFactory = networkSocketFactoryOverride ?: return base
+        return base.newBuilder()
+            .socketFactory(socketFactory)
+            .build()
     }
 
     private fun enqueueAndClose(call: Call, label: String) {
