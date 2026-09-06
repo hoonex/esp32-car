@@ -469,11 +469,17 @@ class ClassicBluetoothManager(context: Context) {
         }
     }
 
-    /** Only the minimal non-driving commands needed to migrate known firmware 3.2.x are allowed. */
+    /**
+     * Legacy firmware is deliberately restricted to migration-only commands. W:/X are needed to
+     * move a 3.2.x board onto the phone's normal LAN so the built-in HTTP /api/ota path can be used
+     * when ArduinoOTA reverse TCP is broken in the core used by that firmware.
+     */
     fun sendLegacyUpgradeCommand(command: String) {
         if (!_legacyUpgradeAvailable.value || socket == null || outputStream == null) return
         val normalized = command.trimEnd('\r', '\n')
-        if (normalized != "U" && normalized != "STATUS") return
+        if (normalized.contains('\r') || normalized.contains('\n')) return
+        val allowed = normalized == "U" || normalized == "X" || normalized == "STATUS" || normalized.startsWith("W:")
+        if (!allowed) return
         enqueueControl(normalized, generation.get())
     }
 

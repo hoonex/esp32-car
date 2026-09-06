@@ -24,13 +24,13 @@ jobs:
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Install ESP32 Arduino core 3.3.11
+      - name: Install ESP32 Arduino core 3.3.0
         shell: bash
         run: |
           arduino-cli config init
           arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
-          arduino-cli core install esp32:esp32@3.3.11
+          arduino-cli core install esp32:esp32@3.3.0
           python3 -m pip install --user esptool==5.0.2
 
       - name: Compile AI Thinker ESP32-CAM 2WD firmware
@@ -52,7 +52,7 @@ jobs:
           FW="$(find build/firmware -maxdepth 1 -type f -name '*.ino.bin' ! -name '*.bootloader.bin' ! -name '*.partitions.bin' | head -n1)"
           BOOT="$(find build/firmware -maxdepth 1 -type f -name '*.bootloader.bin' | head -n1)"
           PART="$(find build/firmware -maxdepth 1 -type f -name '*.partitions.bin' | head -n1)"
-          BOOT_APP0="$(find "$HOME/.arduino15/packages/esp32/hardware/esp32/3.3.11/tools/partitions" -maxdepth 1 -type f -name 'boot_app0.bin' | head -n1)"
+          BOOT_APP0="$(find "$HOME/.arduino15/packages/esp32/hardware/esp32/3.3.0/tools/partitions" -maxdepth 1 -type f -name 'boot_app0.bin' | head -n1)"
           test -n "$FW" && test -n "$BOOT" && test -n "$PART" && test -n "$BOOT_APP0"
           test -s "$FW" && test -s "$BOOT" && test -s "$PART" && test -s "$BOOT_APP0"
 
@@ -120,7 +120,7 @@ jobs:
           BOOT_APP0_SHA="$(sha256sum dist/firmware/boot_app0.bin | awk '{print $1}')"
           FACTORY_SHA="$(sha256sum dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin | awk '{print $1}')"
           FACTORY_SIZE="$(stat -c%s dist/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin)"
-          printf '{"version":"%s","sha256":"%s","size":%s,"boot_app0_sha256":"%s","factory_sha256":"%s","factory_size":%s,"board":"AI Thinker ESP32-CAM","profile":"AI_THINKER_ESP32_CAM_2WD_L298N","flash":"4MB","core":"3.3.11","flash_layout":"arduino-esp32-4-image","boot_app0_offset":"0xE000"}\n' "$VERSION" "$APP_SHA" "$APP_SIZE" "$BOOT_APP0_SHA" "$FACTORY_SHA" "$FACTORY_SIZE" > dist/firmware/manifest.json
+          printf '{"version":"%s","sha256":"%s","size":%s,"boot_app0_sha256":"%s","factory_sha256":"%s","factory_size":%s,"board":"AI Thinker ESP32-CAM","profile":"AI_THINKER_ESP32_CAM_2WD_L298N","flash":"4MB","core":"3.3.0","flash_layout":"arduino-esp32-4-image","boot_app0_offset":"0xE000"}\n' "$VERSION" "$APP_SHA" "$APP_SIZE" "$BOOT_APP0_SHA" "$FACTORY_SHA" "$FACTORY_SIZE" > dist/firmware/manifest.json
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cat dist/firmware/manifest.json
 

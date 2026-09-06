@@ -215,7 +215,15 @@ object AppUpdater {
             .removePrefix("android-v")
             .removePrefix("v")
             .trim()
-        if (latestVersion.isBlank() || compareVersions(latestVersion, currentVersion) <= 0) return null
+        if (latestVersion.isBlank()) error("GitHub release 버전을 읽지 못했습니다.")
+
+        when (compareVersions(latestVersion, currentVersion)) {
+            -1 -> error(
+                "자동 업데이트 릴리즈 채널이 v${latestVersion}에서 멈춰 있습니다. " +
+                    "현재 앱은 v${currentVersion}입니다. 새 APK가 공식 릴리즈로 게시되지 않았습니다."
+            )
+            0 -> return null
+        }
 
         val assets = json.optJSONArray("assets") ?: error("Release asset 목록이 없습니다.")
         var apkAsset: JSONObject? = null
