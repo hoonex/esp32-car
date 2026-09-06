@@ -213,8 +213,7 @@ object ArduinoOtaClient {
 
             val clientFd = try {
                 waitForFd(listener.fd, OsConstants.POLLIN, TCP_ACCEPT_TIMEOUT_MS)
-                val peer = InetSocketAddress()
-                Os.accept(listener.fd, peer)
+                Os.accept(listener.fd, null)
             } catch (error: SocketTimeoutException) {
                 throw ReverseTcpTimeout(
                     "${listener.label} listener ${localAddress.hostAddress}:${listener.localPort} timed out after UDP/auth OK",
