@@ -134,7 +134,7 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
 
                     Text("펌웨어 업데이트 필요", color = Color.White, fontSize = if (compact) 25.sp else 36.sp, fontWeight = FontWeight.Black)
                     Text(
-                        "$connectedName · FW v$legacyVersion\nBluetooth는 정상적으로 열렸고, 이 버전은 앱 OTA로 v$targetVersion까지 올릴 수 있습니다.",
+                        "$connectedName · FW v$legacyVersion\nBluetooth는 정상적으로 열렸고, 이 버전은 앱 OTA로 v${targetVersion}까지 올릴 수 있습니다.",
                         color = LegacyMuted,
                         fontSize = if (compact) 10.sp else 13.sp,
                         lineHeight = if (compact) 14.sp else 18.sp
