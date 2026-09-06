@@ -8,6 +8,7 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -23,11 +24,23 @@ import javax.crypto.spec.SecretKeySpec
  */
 object ArduinoOtaClient {
     private const val OTA_PORT = 3232
-    private const val INVITE_RETRIES = 8
-    private const val UDP_TIMEOUT_MS = 1800
-    private const val TCP_ACCEPT_TIMEOUT_MS = 15_000
+    private const val PREFERRED_CALLBACK_PORT = 3233
+    private const val INVITE_RETRIES = 6
+    private const val UDP_TIMEOUT_MS = 1600
+    private const val TCP_ACCEPT_TIMEOUT_MS = 7_000
     private const val TCP_IO_TIMEOUT_MS = 8_000
     private const val CHUNK_SIZE = 1024
+
+    private data class ListenerStrategy(
+        val label: String,
+        val bindAddress: InetAddress?,
+        val port: Int
+    )
+
+    private class ReverseTcpTimeout(
+        message: String,
+        cause: Throwable
+    ) : IOException(message, cause)
 
     fun upload(
         network: Network,
@@ -44,10 +57,54 @@ object ArduinoOtaClient {
 
         val firmwareMd5 = md5Hex(firmware)
         val remoteAddress = InetAddress.getByName(remoteHost)
+        val strategies = listOf(
+            ListenerStrategy("wildcard-fixed", null, PREFERRED_CALLBACK_PORT),
+            ListenerStrategy("wifi-fixed", localAddress, PREFERRED_CALLBACK_PORT),
+            ListenerStrategy("wildcard-ephemeral", null, 0),
+            ListenerStrategy("wifi-ephemeral", localAddress, 0)
+        )
 
-        ServerSocket().use { server ->
-            server.reuseAddress = true
-            server.bind(InetSocketAddress(localAddress, 0))
+        var reverseTcpFailure: Throwable? = null
+        var listenerBindFailure: Throwable? = null
+
+        for ((index, strategy) in strategies.withIndex()) {
+            try {
+                uploadAttempt(
+                    network = network,
+                    localAddress = localAddress,
+                    remoteAddress = remoteAddress,
+                    firmware = firmware,
+                    firmwareMd5 = firmwareMd5,
+                    password = password,
+                    strategy = strategy,
+                    onProgress = onProgress
+                )
+                return@runCatching
+            } catch (error: ReverseTcpTimeout) {
+                reverseTcpFailure = error
+                if (index + 1 < strategies.size) Thread.sleep(450)
+            } catch (error: java.net.BindException) {
+                listenerBindFailure = error
+            }
+        }
+
+        val detail = reverseTcpFailure?.message
+            ?: listenerBindFailure?.message
+            ?: "unknown callback listener failure"
+        throw IOException("ArduinoOTA UDP/auth succeeded but ESP32 -> Android TCP callback failed: $detail", reverseTcpFailure ?: listenerBindFailure)
+    }
+
+    private fun uploadAttempt(
+        network: Network,
+        localAddress: InetAddress,
+        remoteAddress: InetAddress,
+        firmware: ByteArray,
+        firmwareMd5: String,
+        password: String,
+        strategy: ListenerStrategy,
+        onProgress: (sent: Long, total: Long) -> Unit
+    ) {
+        openServer(strategy).use { server ->
             server.soTimeout = TCP_ACCEPT_TIMEOUT_MS
 
             DatagramSocket(null).use { udp ->
@@ -84,50 +141,82 @@ object ArduinoOtaClient {
 
                 if (!authorized) {
                     throw IOException(
-                        "ArduinoOTA did not answer on UDP $OTA_PORT",
+                        "ArduinoOTA did not answer/authenticate on UDP $OTA_PORT",
                         lastFailure
                     )
                 }
             }
 
-            server.accept().use { socket ->
-                socket.soTimeout = TCP_IO_TIMEOUT_MS
-                val input = socket.getInputStream()
-                val output = socket.getOutputStream()
-                var offset = 0
+            val socket = try {
+                server.accept()
+            } catch (error: SocketTimeoutException) {
+                throw ReverseTcpTimeout(
+                    "${strategy.label} listener ${localAddress.hostAddress}:${server.localPort} timed out after UDP/auth OK",
+                    error
+                )
+            }
 
-                while (offset < firmware.size) {
-                    val count = minOf(CHUNK_SIZE, firmware.size - offset)
-                    output.write(firmware, offset, count)
-                    output.flush()
+            transferFirmware(socket, firmware, remoteAddress, onProgress)
+        }
+    }
 
-                    val ack = readReply(input, 64)
-                    if (ack.contains("ERROR", ignoreCase = true)) {
-                        throw IOException("ArduinoOTA flash error: $ack")
-                    }
-                    val written = ack.trim().takeWhile { it.isDigit() }.toIntOrNull()
-                    if (written == null || written <= 0) {
-                        throw IOException("Invalid ArduinoOTA acknowledgement: $ack")
-                    }
+    private fun openServer(strategy: ListenerStrategy): ServerSocket = ServerSocket().apply {
+        reuseAddress = true
+        val endpoint = if (strategy.bindAddress == null) {
+            InetSocketAddress(strategy.port)
+        } else {
+            InetSocketAddress(strategy.bindAddress, strategy.port)
+        }
+        bind(endpoint)
+    }
 
-                    offset += count
-                    onProgress(offset.toLong(), firmware.size.toLong())
+    private fun transferFirmware(
+        socket: Socket,
+        firmware: ByteArray,
+        remoteAddress: InetAddress,
+        onProgress: (sent: Long, total: Long) -> Unit
+    ) {
+        socket.use {
+            if (socket.inetAddress != remoteAddress) {
+                throw IOException("Unexpected ArduinoOTA TCP peer: ${socket.inetAddress.hostAddress}")
+            }
+            socket.soTimeout = TCP_IO_TIMEOUT_MS
+            socket.tcpNoDelay = true
+            val input = socket.getInputStream()
+            val output = socket.getOutputStream()
+            var offset = 0
+
+            while (offset < firmware.size) {
+                val count = minOf(CHUNK_SIZE, firmware.size - offset)
+                output.write(firmware, offset, count)
+                output.flush()
+
+                val ack = readReply(input, 64)
+                if (ack.contains("ERROR", ignoreCase = true)) {
+                    throw IOException("ArduinoOTA flash error: $ack")
+                }
+                val written = ack.trim().takeWhile { it.isDigit() }.toIntOrNull()
+                if (written == null || written <= 0) {
+                    throw IOException("Invalid ArduinoOTA acknowledgement: $ack")
                 }
 
-                // The normal result is "OK". Some ESP32 builds reboot/close so quickly
-                // that Android observes EOF first; every chunk was already acknowledged,
-                // so EOF at this point is treated as a completed transfer.
-                val finalReply = try {
-                    readReply(input, 64)
-                } catch (_: SocketTimeoutException) {
-                    ""
-                }
-                if (finalReply.isNotBlank() &&
-                    !finalReply.contains("OK", ignoreCase = true) &&
-                    finalReply.contains("ERROR", ignoreCase = true)
-                ) {
-                    throw IOException("ArduinoOTA final error: $finalReply")
-                }
+                offset += count
+                onProgress(offset.toLong(), firmware.size.toLong())
+            }
+
+            // The normal result is "OK". Some ESP32 builds reboot/close so quickly
+            // that Android observes EOF first; every chunk was already acknowledged,
+            // so EOF at this point is treated as a completed transfer.
+            val finalReply = try {
+                readReply(input, 64)
+            } catch (_: SocketTimeoutException) {
+                ""
+            }
+            if (finalReply.isNotBlank() &&
+                !finalReply.contains("OK", ignoreCase = true) &&
+                finalReply.contains("ERROR", ignoreCase = true)
+            ) {
+                throw IOException("ArduinoOTA final error: $finalReply")
             }
         }
     }
