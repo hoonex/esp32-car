@@ -166,7 +166,7 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
 
                     Text("펌웨어 업데이트 필요", color = Color.White, fontSize = if (compact) 25.sp else 36.sp, fontWeight = FontWeight.Black)
                     Text(
-                        "$connectedName · FW v$legacyVersion\nBluetooth는 정상입니다. 이 3.2.x 빌드의 ArduinoOTA 역접속 문제를 피해서 HTTP OTA로 v$targetVersion까지 올립니다.",
+                        "$connectedName · FW v$legacyVersion\nBluetooth는 정상입니다. 이 3.2.x 빌드의 ArduinoOTA 역접속 문제를 피해서 HTTP OTA로 v${targetVersion}까지 올립니다.",
                         color = LegacyMuted,
                         fontSize = if (compact) 10.sp else 13.sp,
                         lineHeight = if (compact) 14.sp else 18.sp
@@ -211,8 +211,9 @@ fun LegacyFirmwareUpgradeScreen(viewModel: RcViewModel) {
                     StepCard(
                         "1",
                         "권장 · 공유기 Wi-Fi로 ESP32 연결",
-                        lanIp?.let { "ESP32 LAN IP $it" } ?: "휴대폰이 현재 연결된 2.4GHz Wi-Fi 정보를 입력"
-                    , lanIp != null) {
+                        lanIp?.let { "ESP32 LAN IP $it" } ?: "휴대폰이 현재 연결된 2.4GHz Wi-Fi 정보를 입력",
+                        lanIp != null
+                    ) {
                         OutlinedTextField(
                             value = lanSsid,
                             onValueChange = { lanSsid = it },
