@@ -219,8 +219,8 @@ object AppUpdater {
 
         when (compareVersions(latestVersion, currentVersion)) {
             -1 -> error(
-                "자동 업데이트 릴리즈 채널이 v$latestVersion에서 멈춰 있습니다. " +
-                    "현재 앱은 v$currentVersion입니다. 새 APK가 공식 릴리즈로 게시되지 않았습니다."
+                "자동 업데이트 릴리즈 채널이 v${latestVersion}에서 멈춰 있습니다. " +
+                    "현재 앱은 v${currentVersion}입니다. 새 APK가 공식 릴리즈로 게시되지 않았습니다."
             )
             0 -> return null
         }
