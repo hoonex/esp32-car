@@ -61,7 +61,7 @@ object ArduinoOtaClient {
                 var authorized = false
                 var lastFailure: Throwable? = null
 
-                repeat(INVITE_RETRIES) {
+                for (attempt in 0 until INVITE_RETRIES) {
                     sendUdp(udp, target, invitation)
                     try {
                         val reply = receiveUdp(udp)
@@ -73,13 +73,13 @@ object ArduinoOtaClient {
                             }
                             else -> throw IOException("Unexpected ArduinoOTA reply: $reply")
                         }
-                        if (authorized) return@repeat
+                        if (authorized) break
                     } catch (error: SocketTimeoutException) {
                         lastFailure = error
                     } catch (error: IOException) {
                         lastFailure = error
                     }
-                    if (!authorized) Thread.sleep(120)
+                    Thread.sleep(120)
                 }
 
                 if (!authorized) {
