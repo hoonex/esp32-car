@@ -1,6 +1,11 @@
 package io.github.hoonex.esp32car.network
 
 import android.net.Network
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
+import java.io.Closeable
+import java.io.FileDescriptor
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -37,10 +42,67 @@ object ArduinoOtaClient {
         val port: Int
     )
 
+    private data class FdListenerStrategy(
+        val label: String,
+        val port: Int
+    )
+
     private class ReverseTcpTimeout(
         message: String,
         cause: Throwable
     ) : IOException(message, cause)
+
+    private class ListenerOpenFailure(
+        message: String,
+        cause: Throwable
+    ) : IOException(message, cause)
+
+    /**
+     * java.net.ServerSocket cannot be bound to an Android Network. That matters on
+     * internet-less recovery APs where the ESP32 connects back to the uploader.
+     * Keep the listener as a raw fd so Network.bindSocket(fd) can explicitly mark
+     * the listening socket for the recovery Wi-Fi before bind/listen.
+     */
+    private class NetworkBoundListener private constructor(
+        val fd: FileDescriptor,
+        val localPort: Int,
+        val label: String,
+        val localAddress: InetAddress
+    ) : Closeable {
+        override fun close() {
+            closeFd(fd)
+        }
+
+        companion object {
+            fun open(
+                network: Network,
+                localAddress: InetAddress,
+                port: Int,
+                label: String
+            ): NetworkBoundListener {
+                val fd = try {
+                    Os.socket(OsConstants.AF_INET, OsConstants.SOCK_STREAM, OsConstants.IPPROTO_TCP)
+                } catch (error: Throwable) {
+                    throw ListenerOpenFailure("$label socket creation failed: ${error.message}", error)
+                }
+
+                try {
+                    // Must happen while the fd is still unconnected. This is stronger than
+                    // process routing and ensures the reverse TCP listener belongs to the
+                    // ESP32-CAR-UPDATE Network itself.
+                    network.bindSocket(fd)
+                    Os.bind(fd, localAddress, port)
+                    Os.listen(fd, 1)
+                    val bound = Os.getsockname(fd) as? InetSocketAddress
+                        ?: throw IOException("$label listener has no INET socket address")
+                    return NetworkBoundListener(fd, bound.port, label, localAddress)
+                } catch (error: Throwable) {
+                    closeFd(fd)
+                    throw ListenerOpenFailure("$label listener open failed: ${error.message}", error)
+                }
+            }
+        }
+    }
 
     fun upload(
         network: Network,
@@ -57,15 +119,46 @@ object ArduinoOtaClient {
 
         val firmwareMd5 = md5Hex(firmware)
         val remoteAddress = InetAddress.getByName(remoteHost)
+
+        var reverseTcpFailure: Throwable? = null
+        var listenerBindFailure: Throwable? = null
+
+        // First use an fd explicitly attached to the recovery Network. The previous
+        // ServerSocket-only implementation could authenticate over UDP but still miss
+        // the ESP32 -> Android TCP callback on Android's multi-network routing stack.
+        val fdStrategies = listOf(
+            FdListenerStrategy("network-fd-fixed", PREFERRED_CALLBACK_PORT),
+            FdListenerStrategy("network-fd-ephemeral", 0)
+        )
+        for ((index, strategy) in fdStrategies.withIndex()) {
+            try {
+                uploadFdAttempt(
+                    network = network,
+                    localAddress = localAddress,
+                    remoteAddress = remoteAddress,
+                    firmware = firmware,
+                    firmwareMd5 = firmwareMd5,
+                    password = password,
+                    strategy = strategy,
+                    onProgress = onProgress
+                )
+                return@runCatching
+            } catch (error: ReverseTcpTimeout) {
+                reverseTcpFailure = error
+                if (index + 1 < fdStrategies.size) Thread.sleep(450)
+            } catch (error: ListenerOpenFailure) {
+                listenerBindFailure = error
+            }
+        }
+
+        // Retain the Java listener strategies as a compatibility fallback in case a
+        // vendor Android build rejects raw-fd Network binding.
         val strategies = listOf(
             ListenerStrategy("wildcard-fixed", null, PREFERRED_CALLBACK_PORT),
             ListenerStrategy("wifi-fixed", localAddress, PREFERRED_CALLBACK_PORT),
             ListenerStrategy("wildcard-ephemeral", null, 0),
             ListenerStrategy("wifi-ephemeral", localAddress, 0)
         )
-
-        var reverseTcpFailure: Throwable? = null
-        var listenerBindFailure: Throwable? = null
 
         for ((index, strategy) in strategies.withIndex()) {
             try {
@@ -91,7 +184,56 @@ object ArduinoOtaClient {
         val detail = reverseTcpFailure?.message
             ?: listenerBindFailure?.message
             ?: "unknown callback listener failure"
-        throw IOException("ArduinoOTA UDP/auth succeeded but ESP32 -> Android TCP callback failed: $detail", reverseTcpFailure ?: listenerBindFailure)
+        throw IOException(
+            "ArduinoOTA UDP/auth succeeded but ESP32 -> Android TCP callback failed: $detail",
+            reverseTcpFailure ?: listenerBindFailure
+        )
+    }
+
+    private fun uploadFdAttempt(
+        network: Network,
+        localAddress: InetAddress,
+        remoteAddress: InetAddress,
+        firmware: ByteArray,
+        firmwareMd5: String,
+        password: String,
+        strategy: FdListenerStrategy,
+        onProgress: (sent: Long, total: Long) -> Unit
+    ) {
+        NetworkBoundListener.open(network, localAddress, strategy.port, strategy.label).use { listener ->
+            authorizeCallback(
+                network = network,
+                localAddress = localAddress,
+                remoteAddress = remoteAddress,
+                callbackPort = listener.localPort,
+                firmware = firmware,
+                firmwareMd5 = firmwareMd5,
+                password = password
+            )
+
+            val clientFd = try {
+                waitForFd(listener.fd, OsConstants.POLLIN, TCP_ACCEPT_TIMEOUT_MS)
+                Os.accept(listener.fd, null)
+            } catch (error: SocketTimeoutException) {
+                throw ReverseTcpTimeout(
+                    "${listener.label} listener ${localAddress.hostAddress}:${listener.localPort} timed out after UDP/auth OK",
+                    error
+                )
+            } catch (error: android.system.ErrnoException) {
+                throw IOException("${listener.label} accept failed: ${error.message}", error)
+            }
+
+            try {
+                val peer = Os.getpeername(clientFd) as? InetSocketAddress
+                    ?: throw IOException("ArduinoOTA callback peer is not INET")
+                if (peer.address != remoteAddress) {
+                    throw IOException("Unexpected ArduinoOTA TCP peer: ${peer.address.hostAddress}")
+                }
+                transferFirmware(clientFd, firmware, onProgress)
+            } finally {
+                closeFd(clientFd)
+            }
+        }
     }
 
     private fun uploadAttempt(
@@ -107,45 +249,15 @@ object ArduinoOtaClient {
         openServer(strategy).use { server ->
             server.soTimeout = TCP_ACCEPT_TIMEOUT_MS
 
-            DatagramSocket(null).use { udp ->
-                udp.reuseAddress = true
-                udp.bind(InetSocketAddress(localAddress, 0))
-                network.bindSocket(udp)
-                udp.soTimeout = UDP_TIMEOUT_MS
-
-                val target = InetSocketAddress(remoteAddress, OTA_PORT)
-                val invitation = "0 ${server.localPort} ${firmware.size} $firmwareMd5\n"
-                var authorized = false
-                var lastFailure: Throwable? = null
-
-                for (attempt in 0 until INVITE_RETRIES) {
-                    sendUdp(udp, target, invitation)
-                    try {
-                        val reply = receiveUdp(udp)
-                        authorized = when {
-                            reply == "OK" -> true
-                            reply.startsWith("AUTH ") -> {
-                                val nonce = reply.removePrefix("AUTH ").trim()
-                                authenticate(udp, target, password, nonce)
-                            }
-                            else -> throw IOException("Unexpected ArduinoOTA reply: $reply")
-                        }
-                        if (authorized) break
-                    } catch (error: SocketTimeoutException) {
-                        lastFailure = error
-                    } catch (error: IOException) {
-                        lastFailure = error
-                    }
-                    Thread.sleep(120)
-                }
-
-                if (!authorized) {
-                    throw IOException(
-                        "ArduinoOTA did not answer/authenticate on UDP $OTA_PORT",
-                        lastFailure
-                    )
-                }
-            }
+            authorizeCallback(
+                network = network,
+                localAddress = localAddress,
+                remoteAddress = remoteAddress,
+                callbackPort = server.localPort,
+                firmware = firmware,
+                firmwareMd5 = firmwareMd5,
+                password = password
+            )
 
             val socket = try {
                 server.accept()
@@ -157,6 +269,56 @@ object ArduinoOtaClient {
             }
 
             transferFirmware(socket, firmware, remoteAddress, onProgress)
+        }
+    }
+
+    private fun authorizeCallback(
+        network: Network,
+        localAddress: InetAddress,
+        remoteAddress: InetAddress,
+        callbackPort: Int,
+        firmware: ByteArray,
+        firmwareMd5: String,
+        password: String
+    ) {
+        DatagramSocket(null).use { udp ->
+            udp.reuseAddress = true
+            udp.bind(InetSocketAddress(localAddress, 0))
+            network.bindSocket(udp)
+            udp.soTimeout = UDP_TIMEOUT_MS
+
+            val target = InetSocketAddress(remoteAddress, OTA_PORT)
+            val invitation = "0 $callbackPort ${firmware.size} $firmwareMd5\n"
+            var authorized = false
+            var lastFailure: Throwable? = null
+
+            for (attempt in 0 until INVITE_RETRIES) {
+                sendUdp(udp, target, invitation)
+                try {
+                    val reply = receiveUdp(udp)
+                    authorized = when {
+                        reply == "OK" -> true
+                        reply.startsWith("AUTH ") -> {
+                            val nonce = reply.removePrefix("AUTH ").trim()
+                            authenticate(udp, target, password, nonce)
+                        }
+                        else -> throw IOException("Unexpected ArduinoOTA reply: $reply")
+                    }
+                    if (authorized) break
+                } catch (error: SocketTimeoutException) {
+                    lastFailure = error
+                } catch (error: IOException) {
+                    lastFailure = error
+                }
+                Thread.sleep(120)
+            }
+
+            if (!authorized) {
+                throw IOException(
+                    "ArduinoOTA did not answer/authenticate on UDP $OTA_PORT",
+                    lastFailure
+                )
+            }
         }
     }
 
@@ -192,33 +354,93 @@ object ArduinoOtaClient {
                 output.flush()
 
                 val ack = readReply(input, 64)
-                if (ack.contains("ERROR", ignoreCase = true)) {
-                    throw IOException("ArduinoOTA flash error: $ack")
-                }
-                val written = ack.trim().takeWhile { it.isDigit() }.toIntOrNull()
-                if (written == null || written <= 0) {
-                    throw IOException("Invalid ArduinoOTA acknowledgement: $ack")
-                }
-
+                validateChunkAck(ack, offset + count >= firmware.size)
                 offset += count
                 onProgress(offset.toLong(), firmware.size.toLong())
             }
 
-            // The normal result is "OK". Some ESP32 builds reboot/close so quickly
-            // that Android observes EOF first; every chunk was already acknowledged,
-            // so EOF at this point is treated as a completed transfer.
-            val finalReply = try {
-                readReply(input, 64)
-            } catch (_: SocketTimeoutException) {
-                ""
-            }
-            if (finalReply.isNotBlank() &&
-                !finalReply.contains("OK", ignoreCase = true) &&
-                finalReply.contains("ERROR", ignoreCase = true)
-            ) {
-                throw IOException("ArduinoOTA final error: $finalReply")
-            }
+            validateFinalReply(
+                try {
+                    readReply(input, 64)
+                } catch (_: SocketTimeoutException) {
+                    ""
+                }
+            )
         }
+    }
+
+    private fun transferFirmware(
+        fd: FileDescriptor,
+        firmware: ByteArray,
+        onProgress: (sent: Long, total: Long) -> Unit
+    ) {
+        var offset = 0
+        while (offset < firmware.size) {
+            val count = minOf(CHUNK_SIZE, firmware.size - offset)
+            var writtenToSocket = 0
+            while (writtenToSocket < count) {
+                waitForFd(fd, OsConstants.POLLOUT, TCP_IO_TIMEOUT_MS)
+                val n = Os.write(fd, firmware, offset + writtenToSocket, count - writtenToSocket)
+                if (n <= 0) throw IOException("ArduinoOTA TCP write returned $n")
+                writtenToSocket += n
+            }
+
+            val ack = readReply(fd, 64, TCP_IO_TIMEOUT_MS)
+            validateChunkAck(ack, offset + count >= firmware.size)
+            offset += count
+            onProgress(offset.toLong(), firmware.size.toLong())
+        }
+
+        val finalReply = try {
+            readReply(fd, 64, TCP_IO_TIMEOUT_MS)
+        } catch (_: SocketTimeoutException) {
+            ""
+        }
+        validateFinalReply(finalReply)
+    }
+
+    internal fun validateChunkAck(ack: String, finalChunk: Boolean) {
+        if (ack.contains("ERROR", ignoreCase = true)) {
+            throw IOException("ArduinoOTA flash error: $ack")
+        }
+        val trimmed = ack.trim()
+        val written = trimmed.takeWhile { it.isDigit() }.toIntOrNull()
+        if (written != null && written > 0) return
+        if (finalChunk && trimmed.contains("OK", ignoreCase = true)) return
+        throw IOException("Invalid ArduinoOTA acknowledgement: $ack")
+    }
+
+    private fun validateFinalReply(finalReply: String) {
+        if (finalReply.contains("ERROR", ignoreCase = true)) {
+            throw IOException("ArduinoOTA final error: $finalReply")
+        }
+        // EOF/timeout after every chunk was acknowledged is valid: many ESP32 builds
+        // reboot immediately after sending the final OK and Android may observe close first.
+    }
+
+    private fun waitForFd(fd: FileDescriptor, event: Int, timeoutMs: Int) {
+        val pollFd = StructPollfd().apply {
+            this.fd = fd
+            events = event.toShort()
+        }
+        val ready = try {
+            Os.poll(arrayOf(pollFd), timeoutMs)
+        } catch (error: android.system.ErrnoException) {
+            throw IOException("ArduinoOTA socket poll failed: ${error.message}", error)
+        }
+        if (ready <= 0) throw SocketTimeoutException("ArduinoOTA socket timed out after ${timeoutMs}ms")
+    }
+
+    private fun readReply(fd: FileDescriptor, maxBytes: Int, timeoutMs: Int): String {
+        waitForFd(fd, OsConstants.POLLIN, timeoutMs)
+        val buffer = ByteArray(maxBytes)
+        val count = try {
+            Os.read(fd, buffer, 0, buffer.size)
+        } catch (error: android.system.ErrnoException) {
+            throw IOException("ArduinoOTA TCP read failed: ${error.message}", error)
+        }
+        if (count <= 0) return ""
+        return String(buffer, 0, count, Charsets.US_ASCII).trim()
     }
 
     private fun authenticate(
@@ -325,4 +547,9 @@ object ArduinoOtaClient {
         MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private fun closeFd(fd: FileDescriptor?) {
+        if (fd == null || !fd.valid()) return
+        runCatching { Os.close(fd) }
+    }
 }
