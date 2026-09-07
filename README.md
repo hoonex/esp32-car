@@ -14,7 +14,7 @@ Reworked Android controller for an ESP32-CAM 2WD RC car.
 - Wi-Fi drive requests cancel stale drive calls to reduce command backlog.
 - Android permission surface was reduced to what this SPP + LAN app actually needs.
 - Firebase/Room/Secrets/AI Studio build baggage and dozens of patch scripts were removed.
-- Firmware v3.0 fixes the old reboot behavior that alternated BT/Wi-Fi modes on every boot.
+- Firmware migration supports authenticated HTTP OTA after a known-good first install.
 
 ## App tabs
 
@@ -31,7 +31,9 @@ Pair `ESP32_CAM_RC` in Android system Bluetooth settings first. The app uses the
 
 ## Firmware
 
-Open `firmware/ESP32_CAM_RC_Controller.ino` in Arduino IDE or PlatformIO. See `firmware/README.md` for the protocol.
+The physically verified first-install/recovery method is to open `firmware/ESP32_CAM_RC_Controller.ino` in Arduino IDE with `firmware/partitions.csv` beside it in the sketch folder, select the AI Thinker ESP32-CAM profile, and upload through the working USB/UART programmer setup.
+
+Generated Windows/factory flash packages are not considered known-good merely because CI builds them. They remain experimental until the physical ESP32-CAM has successfully flashed and booted through that exact path. See `firmware/README.md` for the firmware protocol and migration details.
 
 ## Build
 
