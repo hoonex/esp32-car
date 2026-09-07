@@ -1,4 +1,4 @@
-// ESP32 Car firmware v3.3.0
+// ESP32 Car firmware v3.3.1
 // Target: AI Thinker ESP32-CAM + OV2640 + 2WD chassis + L298N four-input motor driver
 // Motor wiring profile: LEFT GPIO13/12, RIGHT GPIO14/15, flash LED GPIO4
 
@@ -48,7 +48,7 @@ static const int MOTOR_PWM_FREQ = 18000;
 static const int LED_PWM_FREQ = 5000;
 static const int PWM_BITS = 8;
 
-static const char* FW_VERSION = "3.3.0";
+static const char* FW_VERSION = "3.3.1";
 static const int PROTOCOL_VERSION = 2;
 static const char* HARDWARE_PROFILE = "AI_THINKER_ESP32_CAM_2WD_L298N";
 static const char* UPDATE_AP_SSID = "ESP32-CAR-UPDATE";
@@ -169,7 +169,6 @@ void writeLeftPhysical(int value) {
 
 void writeRightPhysical(int value) {
   value = constrain(value, -255, 255);
-  // This side is electrically mirrored on the common AI Thinker 2WD/L298N harness.
   if (value >= 0) {
     ledcWrite(MOTOR_R_PIN_1, 0);
     ledcWrite(MOTOR_R_PIN_2, value);
@@ -325,7 +324,11 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 
 static esp_err_t captureHandler(httpd_req_t* req) {
   if (!controlAuthorized(req)) return sendUnauthorized(req);
-  if (!cameraStarted) return httpd_resp_send_500(req);
+  if (!cameraStarted) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"camera_unavailable\"}");
+  }
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return httpd_resp_send_500(req);
   httpd_resp_set_type(req, "image/jpeg");
@@ -364,6 +367,8 @@ String statusJson(bool includeKey) {
   json += "\"deadman_trips\":" + String(deadmanTrips) + ",";
   json += "\"stream_fps\":" + String(streamFps) + ",";
   json += "\"camera\":" + String(cameraStarted ? "true" : "false") + ",";
+  json += "\"http_ready\":" + String(cameraHttpd != NULL ? "true" : "false") + ",";
+  json += "\"stream_ready\":" + String(streamHttpd != NULL ? "true" : "false") + ",";
   json += "\"spp_connected\":" + String(sppClientConnected ? "true" : "false") + ",";
   json += "\"ota\":true";
   if (includeKey) json += ",\"ota_key\":\"" + otaKey + "\"";
@@ -393,7 +398,6 @@ static esp_err_t actionHandler(httpd_req_t* req) {
   if (httpd_query_key_value(query, "light", value, sizeof(value)) == ESP_OK) {
     ledcWrite(FLASH_LED_PIN, constrain(atoi(value), 0, 255));
   }
-
   if (httpd_query_key_value(query, "speed", value, sizeof(value)) == ESP_OK) {
     currentSpeed = constrain(atoi(value), 50, 255);
   }
@@ -404,9 +408,7 @@ static esp_err_t actionHandler(httpd_req_t* req) {
   char leftValue[16], rightValue[16];
   bool hasLeft = httpd_query_key_value(query, "left", leftValue, sizeof(leftValue)) == ESP_OK;
   bool hasRight = httpd_query_key_value(query, "right", rightValue, sizeof(rightValue)) == ESP_OK;
-  if (hasLeft && hasRight) {
-    motorsSet(atoi(leftValue), atoi(rightValue));
-  }
+  if (hasLeft && hasRight) motorsSet(atoi(leftValue), atoi(rightValue));
 
   if (httpd_query_key_value(query, "motor_swap", value, sizeof(value)) == ESP_OK) {
     motorSwap = atoi(value) != 0;
@@ -535,7 +537,7 @@ static esp_err_t indexHandler(httpd_req_t* req) {
   const char* page =
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<style>body{background:#080b10;color:#fff;font-family:sans-serif;margin:24px}</style></head>"
-    "<body><h2>ESP32 Car 3.3</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p>"
+    "<body><h2>ESP32 Car 3.3.1</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p>"
     "<p>Control, camera and diagnostics require the per-device key delivered over Bluetooth. Use the Android app.</p></body></html>";
   httpd_resp_set_type(req, "text/html");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -543,34 +545,48 @@ static esp_err_t indexHandler(httpd_req_t* req) {
 }
 
 void startServers() {
-  if (serversStarted) return;
+  // Critical recovery invariant: port 80 must not depend on OV2640 initialization.
+  // A broken/unplugged camera must still leave status and HTTP OTA reachable.
+  if (cameraHttpd == NULL) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.ctrl_port = 32767;
+    if (httpd_start(&cameraHttpd, &config) == ESP_OK) {
+      httpd_uri_t indexUri = { .uri = "/", .method = HTTP_GET, .handler = indexHandler, .user_ctx = NULL };
+      httpd_uri_t actionUri = { .uri = "/action", .method = HTTP_GET, .handler = actionHandler, .user_ctx = NULL };
+      httpd_uri_t captureUri = { .uri = "/capture", .method = HTTP_GET, .handler = captureHandler, .user_ctx = NULL };
+      httpd_uri_t infoUri = { .uri = "/api/info", .method = HTTP_GET, .handler = otaInfoHandler, .user_ctx = NULL };
+      httpd_uri_t otaUri = { .uri = "/api/ota", .method = HTTP_POST, .handler = otaUploadHandler, .user_ctx = NULL };
+      httpd_register_uri_handler(cameraHttpd, &indexUri);
+      httpd_register_uri_handler(cameraHttpd, &actionUri);
+      httpd_register_uri_handler(cameraHttpd, &captureUri);
+      httpd_register_uri_handler(cameraHttpd, &infoUri);
+      httpd_register_uri_handler(cameraHttpd, &otaUri);
+      Serial.println("[HTTP] control/OTA server ready on :80");
+    } else {
+      cameraHttpd = NULL;
+      Serial.println("[HTTP] failed to start control/OTA server on :80");
+    }
+  }
+
+  // Camera is best-effort. Its failure must not tear down or block the OTA server above.
   ensureCamera();
-  if (!cameraStarted) return;
-
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 80;
-  config.ctrl_port = 32767;
-  if (httpd_start(&cameraHttpd, &config) == ESP_OK) {
-    httpd_uri_t indexUri = { .uri = "/", .method = HTTP_GET, .handler = indexHandler, .user_ctx = NULL };
-    httpd_uri_t actionUri = { .uri = "/action", .method = HTTP_GET, .handler = actionHandler, .user_ctx = NULL };
-    httpd_uri_t captureUri = { .uri = "/capture", .method = HTTP_GET, .handler = captureHandler, .user_ctx = NULL };
-    httpd_uri_t infoUri = { .uri = "/api/info", .method = HTTP_GET, .handler = otaInfoHandler, .user_ctx = NULL };
-    httpd_uri_t otaUri = { .uri = "/api/ota", .method = HTTP_POST, .handler = otaUploadHandler, .user_ctx = NULL };
-    httpd_register_uri_handler(cameraHttpd, &indexUri);
-    httpd_register_uri_handler(cameraHttpd, &actionUri);
-    httpd_register_uri_handler(cameraHttpd, &captureUri);
-    httpd_register_uri_handler(cameraHttpd, &infoUri);
-    httpd_register_uri_handler(cameraHttpd, &otaUri);
+  if (cameraStarted && streamHttpd == NULL) {
+    httpd_config_t streamConfig = HTTPD_DEFAULT_CONFIG();
+    streamConfig.server_port = 81;
+    streamConfig.ctrl_port = 32766;
+    if (httpd_start(&streamHttpd, &streamConfig) == ESP_OK) {
+      httpd_uri_t streamUri = { .uri = "/stream", .method = HTTP_GET, .handler = streamHandler, .user_ctx = NULL };
+      httpd_register_uri_handler(streamHttpd, &streamUri);
+      Serial.println("[HTTP] camera stream server ready on :81");
+    } else {
+      streamHttpd = NULL;
+      Serial.println("[HTTP] failed to start camera stream server on :81");
+    }
   }
 
-  httpd_config_t streamConfig = HTTPD_DEFAULT_CONFIG();
-  streamConfig.server_port = 81;
-  streamConfig.ctrl_port = 32766;
-  if (httpd_start(&streamHttpd, &streamConfig) == ESP_OK) {
-    httpd_uri_t streamUri = { .uri = "/stream", .method = HTTP_GET, .handler = streamHandler, .user_ctx = NULL };
-    httpd_register_uri_handler(streamHttpd, &streamUri);
-  }
-  serversStarted = (cameraHttpd != NULL && streamHttpd != NULL);
+  // For recovery semantics, the essential server is port 80 only.
+  serversStarted = (cameraHttpd != NULL);
 }
 
 void startOta() {
@@ -617,11 +633,15 @@ bool connectWifiAndStart() {
 void startRecoveryAp() {
   motorsStop();
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD);
+  if (!WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD)) {
+    Serial.println("[WIFI] failed to start recovery AP");
+    return;
+  }
   recoveryApActive = true;
   wifiOnline = true;
   startServers();
   startOta();
+  Serial.printf("[WIFI] recovery AP ready @ %s\n", WiFi.softAPIP().toString().c_str());
 }
 
 // ===== Bluetooth SPP =====
