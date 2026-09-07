@@ -1,6 +1,6 @@
 # ESP32 Car firmware
 
-Firmware targets the AI Thinker ESP32-CAM used by the 2WD L298N camera car.
+Current firmware: **v3.3.1**, targeting the AI Thinker ESP32-CAM used by the 2WD L298N camera car.
 
 ## Installation model
 
@@ -18,6 +18,12 @@ Firmware targets the AI Thinker ESP32-CAM used by the 2WD L298N camera car.
 5. Confirm that `ESP32_CAM_RC` appears over Classic Bluetooth before attempting app-driven OTA migration.
 
 The physical board result is the source of truth. A CI-green precompiled flasher is not considered working until this exact board has successfully booted from it.
+
+## OTA recovery invariant
+
+Starting with **v3.3.1**, the HTTP control/OTA server on port 80 is started **before and independently of OV2640 camera initialization**. A missing, failed, or unplugged camera may disable `/capture` and the port-81 stream, but it must not disable `GET /api/info` or `POST /api/ota`.
+
+`STATUS` also reports `http_ready` and `stream_ready` so the Android app can distinguish an OTA/control-server failure from a camera-only failure.
 
 ## OTA safety
 
