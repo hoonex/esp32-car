@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,7 +51,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -60,7 +58,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -75,6 +72,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.abs
@@ -185,7 +183,7 @@ private fun FreshConnectScreen(viewModel: RcViewModel) {
                         }
                         if (devices.isEmpty()) {
                             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                                Text("검색을 눌러 ESP32_CAM_RC를 찾으세요.", color = TextMuted, fontSize = 10.sp)
+                                Text("ESP32_CAM_RC를 자동으로 찾는 중입니다.", color = TextMuted, fontSize = 10.sp)
                             }
                         }
                     }
@@ -246,7 +244,9 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
     val status = wifiStatus ?: btStatus
     val ip = status?.optString("ip")?.takeIf { it.isNotBlank() && it != "0.0.0.0" } ?: viewModel.settings.ipAddress
     val fw = btStatus?.optString("fw")?.takeIf { it.isNotBlank() } ?: viewModel.settings.lastFirmwareVersion.ifBlank { "—" }
-    val visionReady = status?.optBoolean("camera", false) == true && ip.isNotBlank()
+    // v3.2.0 never reported a `camera` boolean even when its MJPEG server was healthy.
+    // The actual stream is authoritative, so any valid IP is enough to start/recover vision.
+    val visionConfigured = ip.isNotBlank()
 
     LaunchedEffect(Unit) {
         viewModel.updateSpeed(255f)
@@ -294,7 +294,7 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
 
         CameraCanvas(
             ip = ip,
-            enabled = visionReady,
+            enabled = visionConfigured,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = headerHeight)
@@ -302,7 +302,7 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
 
         TopBar(
             fw = fw,
-            wifiOnline = ip.isNotBlank() && wifiError.isNullOrBlank(),
+            wifiOnline = visionConfigured && wifiError.isNullOrBlank(),
             lightOn = light > 0f,
             onLight = { viewModel.updateLight(if (light > 0f) 0f else 255f) },
             onWifi = { wifiDialog = true },
@@ -317,7 +317,7 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
             modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().height(headerHeight)
         )
 
-        if (!visionReady) {
+        if (!visionConfigured) {
             Surface(
                 modifier = Modifier.align(Alignment.Center).padding(top = headerHeight),
                 color = Panel,
@@ -327,7 +327,7 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
                 Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(7.dp).background(Amber, CircleShape))
                     Spacer(Modifier.width(8.dp))
-                    Text(if (ip.isBlank()) "Wi‑Fi vision not connected" else "Camera unavailable · Bluetooth control active", color = TextMuted, fontSize = 8.sp)
+                    Text("Wi‑Fi vision not connected · Bluetooth control active", color = TextMuted, fontSize = 8.sp)
                 }
             }
         }
@@ -578,24 +578,34 @@ private fun CameraCanvas(ip: String, enabled: Boolean, modifier: Modifier = Modi
         frame = null
         failed = false
         if (!enabled || ip.isBlank()) return@LaunchedEffect
+
         withContext(Dispatchers.IO) {
-            var connection: HttpURLConnection? = null
-            try {
-                val host = ip.removePrefix("http://").removePrefix("https://").substringBefore('/').substringBefore(':')
-                connection = URL("http://$host:81/stream").openConnection() as HttpURLConnection
-                connection.connectTimeout = 2500
-                connection.readTimeout = 5000
-                connection.useCaches = false
-                connection.connect()
-                BufferedInputStream(connection.inputStream, 64 * 1024).use { input ->
-                    while (isActive) {
-                        MjpegParser.readFrame(input)?.let { frame = it }
+            val host = ip.removePrefix("http://").removePrefix("https://").substringBefore('/').substringBefore(':')
+            while (isActive) {
+                var connection: HttpURLConnection? = null
+                try {
+                    connection = URL("http://$host:81/stream").openConnection() as HttpURLConnection
+                    connection.connectTimeout = 2500
+                    connection.readTimeout = 6000
+                    connection.useCaches = false
+                    connection.connect()
+                    if (connection.responseCode !in 200..299) {
+                        throw IOException("Camera HTTP ${connection.responseCode}")
                     }
+                    failed = false
+                    BufferedInputStream(connection.inputStream, 64 * 1024).use { input ->
+                        while (isActive) {
+                            val next = MjpegParser.readFrame(input) ?: throw IOException("Camera stream ended")
+                            frame = next
+                        }
+                    }
+                } catch (_: Throwable) {
+                    if (!isActive) break
+                    failed = true
+                    delay(1200)
+                } finally {
+                    connection?.disconnect()
                 }
-            } catch (_: Throwable) {
-                if (isActive) failed = true
-            } finally {
-                connection?.disconnect()
             }
         }
     }
@@ -615,7 +625,7 @@ private fun CameraCanvas(ip: String, enabled: Boolean, modifier: Modifier = Modi
                 Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Refresh, null, Modifier.size(13.dp), tint = Amber)
                     Spacer(Modifier.width(6.dp))
-                    Text("Retry camera", color = TextMuted, fontSize = 7.sp)
+                    Text("Camera reconnecting automatically", color = TextMuted, fontSize = 7.sp)
                 }
             }
         }
