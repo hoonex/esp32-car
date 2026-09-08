@@ -21,9 +21,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,14 +36,9 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.lifecycleScope
-import io.github.hoonex.esp32car.ui.screens.LegacyFirmwareUpgradeScreen
-import io.github.hoonex.esp32car.ui.screens.PremiumAppScreen
+import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
-import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val rcViewModel: RcViewModel by viewModels()
@@ -55,20 +50,12 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        lifecycleScope.launch {
-            AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
-        }
-
+        // Deliberately no automatic APK updater here. Until a persistent release signer is
+        // configured, self-update is not trustworthy and should not interfere with driving.
         setContent {
             MyApplicationTheme {
                 BluetoothPermissionGate {
-                    val legacyUpgradeAvailable by rcViewModel.bluetooth.legacyUpgradeAvailable.collectAsStateWithLifecycle()
-                    val legacyMigrationSession by rcViewModel.legacyMigrationSession.collectAsStateWithLifecycle()
-                    if (legacyUpgradeAvailable || legacyMigrationSession) {
-                        LegacyFirmwareUpgradeScreen(rcViewModel)
-                    } else {
-                        PremiumAppScreen(rcViewModel)
-                    }
+                    FreshCarScreen(rcViewModel)
                 }
             }
         }
@@ -77,7 +64,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
-        AppUpdater.resumePendingInstall(this)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -138,18 +124,18 @@ private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     if (granted) {
         content()
     } else {
-        Box(Modifier.fillMaxSize().background(Color(0xFF070A0E))) {
+        Box(Modifier.fillMaxSize().background(Color(0xFF080A0D))) {
             Column(
                 modifier = Modifier.align(Alignment.Center).padding(28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("BLUETOOTH / LOCAL NETWORK PERMISSION", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
+                Text("ESP32 CAR", color = Color.White, fontWeight = FontWeight.Black, fontSize = 22.sp)
                 Text(
-                    if (requestedOnce) "Nearby devices 권한이 꺼져 있어 ESP32_CAM_RC 및 로컬 OTA 통신을 사용할 수 없습니다."
-                    else "ESP32_CAM_RC 검색과 로컬 OTA 통신에는 Nearby devices 권한이 필요합니다.",
-                    color = Color(0xFF9AA5AF),
-                    fontSize = 12.sp
+                    if (requestedOnce) "Bluetooth / Nearby devices 권한을 허용해야 연결할 수 있습니다."
+                    else "ESP32_CAM_RC 연결을 위해 Bluetooth / Nearby devices 권한이 필요합니다.",
+                    color = Color(0xFF8D98A3),
+                    fontSize = 11.sp
                 )
                 Button(onClick = { launcher.launch(requiredPermissions()) }) {
                     Text("권한 허용")
