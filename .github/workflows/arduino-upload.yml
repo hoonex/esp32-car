@@ -31,7 +31,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.0
 
-      - name: Verify OTA server is independent of camera startup
+      - name: Verify v4 hybrid recovery contract
         shell: bash
         run: |
           set -euo pipefail
@@ -39,22 +39,38 @@ jobs:
           from pathlib import Path
 
           text = Path('firmware/ESP32_CAM_RC_Controller.ino').read_text(encoding='utf-8')
-          start = text.index('void startServers() {')
-          end = text.index('\nvoid startOta()', start)
-          block = text[start:end]
-
-          control_start = block.index('httpd_start(&cameraHttpd')
-          camera_start = block.index('ensureCamera(')
-          if control_start >= camera_start:
-              raise SystemExit('port 80 must start before camera initialization')
-          if 'if (!cameraStarted) return;' in block:
-              raise SystemExit('camera failure must not abort startServers()')
-          if 'serversStarted = (cameraHttpd != NULL);' not in block:
-              raise SystemExit('recovery readiness must depend on port 80 only')
-          for required in ('/api/info', '/api/ota', 'http_ready', 'stream_ready'):
+          for required in (
+              'FW_VERSION = "4.0.0"',
+              'SerialBT.begin("ESP32_CAM_RC")',
+              'bool startControlServer()',
+              'bool startStreamServer()',
+              'startControlServer();',
+              'if (startCamera()) startStreamServer();',
+              '/api/info',
+              '/api/ota',
+              'http_ready',
+              'stream_ready',
+              'CAM_RETRY',
+              'ledcAttachChannel(MOTOR_R_PIN_1',
+              'MOTOR_R_CH_1 = 8',
+              'config.ledc_channel = LEDC_CHANNEL_0',
+          ):
               if required not in text:
-                  raise SystemExit(f'missing recovery diagnostic: {required}')
-          print('OTA/control port 80 is structurally independent of camera startup')
+                  raise SystemExit(f'missing v4 contract: {required}')
+
+          connect_start = text.index('bool connectWifiAndStartServices')
+          connect_end = text.index('\nvoid processBluetoothCommand', connect_start)
+          connect_block = text[connect_start:connect_end]
+          if connect_block.index('startControlServer();') >= connect_block.index('startCamera()'):
+              raise SystemExit('port 80 must start before camera initialization')
+
+          control_start = text.index('bool startControlServer()')
+          control_end = text.index('\nbool startStreamServer()', control_start)
+          control_block = text[control_start:control_end]
+          if 'startCamera(' in control_block or 'cameraReady' in control_block:
+              raise SystemExit('port 80 server must not depend on camera initialization')
+
+          print('v4 hybrid contract OK: BT drive + independent :80 OTA + isolated camera LEDC channel')
           PY
 
       - name: Build exact sketch package
@@ -67,9 +83,9 @@ jobs:
           cp firmware/partitions.csv dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv
           cp tools/arduino/Upload-ESP32-Car.ps1 dist/arduino-sketch/Upload-ESP32-Car.ps1
           cat > dist/arduino-sketch/README.txt <<'EOF'
-          ESP32 Car - canonical first install / recovery path
+          ESP32 Car v4.0.0 - canonical first install / recovery path
 
-          Physically verified path:
+          Physically trusted first-install path:
           1. Open ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino in Arduino IDE.
           2. Select AI Thinker ESP32-CAM / ESP32 Wrover-compatible ESP32-CAM board setup.
           3. Select the programmer COM port.
@@ -77,10 +93,10 @@ jobs:
           5. If manual download mode is required: GPIO0 -> GND, reset, upload, then disconnect GPIO0 and reset again.
           6. Expected Bluetooth name after boot: ESP32_CAM_RC.
 
-          Firmware v3.3.2 starts HTTP control/OTA on port 80 independently of camera initialization.
-          Bluetooth remains the drive/safety transport; Wi-Fi is the vision/diagnostic/OTA transport.
-          Upload-ESP32-Car.ps1 is an optional helper that calls arduino-cli compile/upload instead of raw esptool.
-          It intentionally uses the Arduino upload recipe because the previous custom Windows/factory flasher is NOT physically verified.
+          v4 keeps Bluetooth alive for driving while Wi-Fi runs camera/status/HTTP OTA in parallel.
+          Port 80 starts even if OV2640 initialization fails. Port 81 is MJPEG only.
+          Motor/flash PWM uses explicit LEDC channels 8-12 so camera XCLK can own channel 0.
+          Upload-ESP32-Car.ps1 is optional; the direct Arduino IDE .ino upload remains the physical baseline.
           EOF
 
       - name: Compile packaged sketch exactly as Arduino
@@ -98,7 +114,7 @@ jobs:
           test -s dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
           test -s dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv
           test -s dist/arduino-sketch/Upload-ESP32-Car.ps1
-          grep -F 'FW_VERSION = "3.3.2"' dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
+          grep -F 'FW_VERSION = "4.0.0"' dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
           grep -F 'arduino-cli upload --verbose' dist/arduino-sketch/Upload-ESP32-Car.ps1
 
       - name: Upload Arduino sketch package
