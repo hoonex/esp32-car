@@ -39,7 +39,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.ui.screens.LegacyFirmwareUpgradeScreen
-import io.github.hoonex.esp32car.ui.screens.PilotCockpitScreen
+import io.github.hoonex.esp32car.ui.screens.PremiumPilotCockpitScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
@@ -67,7 +67,7 @@ class MainActivity : ComponentActivity() {
                     if (legacyUpgradeAvailable || legacyMigrationSession) {
                         LegacyFirmwareUpgradeScreen(rcViewModel)
                     } else {
-                        PilotCockpitScreen(rcViewModel)
+                        PremiumPilotCockpitScreen(rcViewModel)
                     }
                 }
             }
