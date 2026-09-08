@@ -247,6 +247,8 @@ void stopStreamServer() {
 }
 
 bool retryCamera() {
+  // Camera reinitialization can block long enough to violate the drive deadman loop. Stop first.
+  motorsStop();
   stopStreamServer();
   if (cameraReady) {
     esp_camera_deinit();
@@ -494,6 +496,8 @@ bool startStreamServer() {
 }
 
 bool connectWifiAndStartServices(bool announceBt) {
+  // Wi-Fi association can block for seconds. Never allow the last drive PWM to survive it.
+  motorsStop();
   loadWifiCredentials();
   if (wifiSsid.isEmpty()) {
     if (announceBt) SerialBT.println("ERR:NO_WIFI_CREDENTIALS");
@@ -501,6 +505,7 @@ bool connectWifiAndStartServices(bool announceBt) {
   }
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
   Serial.printf("[WiFi] connecting to %s\n", wifiSsid.c_str());
   uint32_t started = millis();
@@ -508,7 +513,7 @@ bool connectWifiAndStartServices(bool announceBt) {
   if (WiFi.status() != WL_CONNECTED) {
     wifiConnected = false;
     if (announceBt) SerialBT.println("ERR:WIFI_CONNECT_FAILED");
-    Serial.println("[WiFi] failed; Bluetooth control remains active");
+    Serial.println("[WiFi] initial association failed; auto-reconnect remains armed and Bluetooth control is active");
     return false;
   }
   wifiConnected = true;
@@ -628,7 +633,20 @@ void loop() {
     else if (c != '\r') { serialBuffer += c; if (serialBuffer.length() > 160) serialBuffer = ""; }
   }
   if (driveActive && millis() - lastDriveCommandMs > DRIVE_DEADMAN_MS) motorsStop();
-  if (wifiConnected && WiFi.status() != WL_CONNECTED) wifiConnected = false;
+
+  const bool stationNowConnected = WiFi.status() == WL_CONNECTED;
+  if (!stationNowConnected && wifiConnected) {
+    wifiConnected = false;
+    Serial.println("[WiFi] link lost; Bluetooth control unaffected, waiting for auto-reconnect");
+  } else if (stationNowConnected && !wifiConnected) {
+    wifiConnected = true;
+    // HTTP servers bind to all interfaces, so an existing server remains usable after reconnect.
+    // If this is a late first association, create services now.
+    startControlServer();
+    if (startCamera()) startStreamServer();
+    Serial.printf("[WiFi] link restored: %s\n", WiFi.localIP().toString().c_str());
+  }
+
   if (pendingRestart && millis() >= restartAtMs) {
     motorsStop();
     delay(50);
