@@ -211,20 +211,24 @@ class RCClient {
             return
         }
 
+        val totalBytes = firmware.size.toLong()
         val httpBytesSent = AtomicLong(0)
         val body = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaType()
-            override fun contentLength(): Long = firmware.size.toLong()
+            override fun contentLength(): Long = totalBytes
 
             override fun writeTo(sink: BufferedSink) {
-                val chunk = 16 * 1024
+                val chunk = 8 * 1024
                 var offset = 0
                 while (offset < firmware.size) {
                     val count = minOf(chunk, firmware.size - offset)
                     sink.write(firmware, offset, count)
+                    // Keep UI progress close to bytes actually handed to the socket. This also makes
+                    // ESP32-side resets easier to classify than a large buffered write.
+                    sink.flush()
                     offset += count
                     httpBytesSent.set(offset.toLong())
-                    onProgress(offset.toLong(), firmware.size.toLong())
+                    onProgress(offset.toLong(), totalBytes)
                 }
             }
         }
@@ -240,7 +244,28 @@ class RCClient {
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 if (call.isCanceled()) return
-                if (httpBytesSent.get() > 0L) {
+
+                val sent = httpBytesSent.get()
+                if (isPlausibleRebootDisconnect(e, sent, totalBytes)) {
+                    // The ESP32 HTTP server can disappear as the device commits/reboots. Do not call
+                    // this a successful flash here; hand it to the ViewModel as "verification required"
+                    // and require the reported firmware version after reboot to match.
+                    callback(
+                        Result.success(
+                            JSONObject()
+                                .put("ok", false)
+                                .put("transport", "http")
+                                .put("response_lost", true)
+                                .put("verification_required", true)
+                                .put("bytes_sent", sent)
+                                .put("total_bytes", totalBytes)
+                                .put("error", e.message.orEmpty())
+                        )
+                    )
+                    return
+                }
+
+                if (sent > 0L) {
                     callback(Result.failure(e))
                     return
                 }
@@ -314,6 +339,19 @@ class RCClient {
         statusClient.connectionPool.evictAll()
         otaClient.dispatcher.cancelAll()
         otaClient.connectionPool.evictAll()
+    }
+
+    private fun isPlausibleRebootDisconnect(error: IOException, sent: Long, total: Long): Boolean {
+        if (total <= 0L || sent <= 0L) return false
+        val progress = sent.toDouble() / total.toDouble()
+        if (progress < 0.70) return false
+        val message = error.message.orEmpty().lowercase()
+        return sent >= total ||
+            message.contains("connection reset") ||
+            message.contains("socket closed") ||
+            message.contains("broken pipe") ||
+            message.contains("unexpected end of stream") ||
+            message.contains("eof")
     }
 
     private fun requestAction(
