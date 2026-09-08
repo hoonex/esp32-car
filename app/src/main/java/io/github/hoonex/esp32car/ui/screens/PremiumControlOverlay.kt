@@ -43,9 +43,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -115,8 +117,7 @@ private fun PremiumControlDeck(viewModel: RcViewModel, modifier: Modifier = Modi
                 .width(deckWidth)
                 .height(deckHeight)
                 .pointerInput(Unit) {
-                    // Make this deck the hit-test owner so the legacy pad underneath never receives
-                    // a second command while one of the new controllers is in use.
+                    // Own this hit-test region so the legacy pad underneath cannot send a second drive command.
                     awaitPointerEventScope {
                         while (true) awaitPointerEvent()
                     }
@@ -381,6 +382,8 @@ private fun TankLane(
     onActive: (Boolean) -> Unit
 ) {
     var size by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+    val thumbTravelPx = remember(density) { with(density) { 48.dp.toPx() } }
 
     fun update(y: Float) {
         if (size.height <= 0) return
@@ -414,7 +417,7 @@ private fun TankLane(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(width = 34.dp, height = 24.dp)
-                    .graphicsLayer { translationY = -value * 48.dp.toPx() },
+                    .graphicsLayer { translationY = -value * thumbTravelPx },
                 color = if (value == 0f) Color(0xFF2A333B) else DeckAccent,
                 shape = RoundedCornerShape(9.dp)
             ) {}
