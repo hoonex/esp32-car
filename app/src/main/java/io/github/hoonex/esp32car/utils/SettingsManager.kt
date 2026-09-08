@@ -6,6 +6,10 @@ import android.content.SharedPreferences
 class SettingsManager(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("rc_settings", Context.MODE_PRIVATE)
 
+    init {
+        migrateDriveDefaults()
+    }
+
     fun migrateDriveDefaults() {
         if (prefs.getInt("drive_defaults_version", 0) >= 2) return
         val edit = prefs.edit()
