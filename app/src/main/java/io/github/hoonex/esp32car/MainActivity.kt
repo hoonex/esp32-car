@@ -1,6 +1,7 @@
 package io.github.hoonex.esp32car
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -36,6 +37,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import io.github.hoonex.esp32car.bluetooth.ConnectionState
+import io.github.hoonex.esp32car.protocol.RcProtocol
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
@@ -85,14 +88,34 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@SuppressLint("MissingPermission")
 @Composable
 private fun ControllerRoot(viewModel: RcViewModel) {
-    // One automatic recovery attempt per app session. A remembered board reconnects without
-    // making the driver revisit the device picker; a first-time install immediately starts scan.
+    // No setup screen for a car the phone already knows. Prefer the last verified board, then an
+    // already-paired ESP32_CAM_RC. If either automatic attempt fails, discovery starts by itself.
     LaunchedEffect(Unit) {
         delay(250)
-        if (!viewModel.reconnectLast()) {
+
+        var attempted = viewModel.reconnectLast()
+        if (!attempted) {
+            val pairedCar = viewModel.pairedDevices().firstOrNull { device ->
+                runCatching { device.name }.getOrNull()?.equals(RcProtocol.DEVICE_NAME, ignoreCase = true) == true
+            }
+            if (pairedCar != null) {
+                viewModel.pairAndConnect(pairedCar)
+                attempted = true
+            }
+        }
+
+        if (!attempted) {
             viewModel.scanBluetooth()
+        } else {
+            // RFCOMM connect + STATUS handshake has a bounded timeout. Recover from a stale saved
+            // device address automatically instead of leaving the app stranded on a dead spinner.
+            delay(5_000)
+            if (viewModel.bluetooth.connectionState.value == ConnectionState.DISCONNECTED) {
+                viewModel.scanBluetooth()
+            }
         }
     }
     FreshCarScreen(viewModel)
