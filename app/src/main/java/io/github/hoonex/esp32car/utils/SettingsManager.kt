@@ -6,9 +6,25 @@ import android.content.SharedPreferences
 class SettingsManager(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("rc_settings", Context.MODE_PRIVATE)
 
+    fun migrateDriveDefaults() {
+        if (prefs.getInt("drive_defaults_version", 0) >= 2) return
+        val edit = prefs.edit()
+        val oldSpeed = prefs.getFloat("speed", 190f)
+        val oldDeadzone = prefs.getFloat("control_deadzone", 0.12f)
+        val oldExpo = prefs.getFloat("steering_expo", 1.35f)
+        if (oldSpeed == 190f) edit.putFloat("speed", 255f)
+        if (oldDeadzone == 0.12f) edit.putFloat("control_deadzone", 0.08f)
+        if (oldExpo == 1.35f) edit.putFloat("steering_expo", 1.12f)
+        edit.putInt("drive_defaults_version", 2).apply()
+    }
+
     var preferredMode: String
         get() = prefs.getString("preferred_mode", "BT") ?: "BT"
         set(value) = prefs.edit().putString("preferred_mode", value).apply()
+
+    var controlMode: String
+        get() = prefs.getString("control_mode", "ARCADE") ?: "ARCADE"
+        set(value) = prefs.edit().putString("control_mode", value.uppercase()).apply()
 
     var ipAddress: String
         get() = prefs.getString("ip_address", "") ?: ""
@@ -23,8 +39,8 @@ class SettingsManager(context: Context) {
         set(value) = prefs.edit().putString("last_firmware_version", value).apply()
 
     var speed: Float
-        get() = prefs.getFloat("speed", 190f)
-        set(value) = prefs.edit().putFloat("speed", value).apply()
+        get() = prefs.getFloat("speed", 255f)
+        set(value) = prefs.edit().putFloat("speed", value.coerceIn(50f, 255f)).apply()
 
     var light: Float
         get() = prefs.getFloat("light", 0f)
@@ -35,7 +51,7 @@ class SettingsManager(context: Context) {
         set(value) = prefs.edit().putFloat("trim", value).apply()
 
     var controlDeadzone: Float
-        get() = prefs.getFloat("control_deadzone", 0.12f)
+        get() = prefs.getFloat("control_deadzone", 0.08f)
         set(value) = prefs.edit().putFloat("control_deadzone", value.coerceIn(0.02f, 0.35f)).apply()
 
     var steeringGain: Float
@@ -43,7 +59,7 @@ class SettingsManager(context: Context) {
         set(value) = prefs.edit().putFloat("steering_gain", value.coerceIn(0.5f, 1.8f)).apply()
 
     var steeringExpo: Float
-        get() = prefs.getFloat("steering_expo", 1.35f)
+        get() = prefs.getFloat("steering_expo", 1.12f)
         set(value) = prefs.edit().putFloat("steering_expo", value.coerceIn(1f, 2.5f)).apply()
 
     var invertThrottle: Boolean
