@@ -390,16 +390,20 @@ class ClassicBluetoothManager(context: Context) {
             val protocol = json.optInt("protocol", -1)
             val firmware = json.optString("fw")
             val legacyKey = json.optString("ota_key")
-            if (profile != EXPECTED_PROFILE) {
+            val targetName = _connectedDeviceName.value?.equals(DEFAULT_DEVICE_NAME, ignoreCase = true) == true
+            val profileCompatible = profile == EXPECTED_PROFILE ||
+                (profile.isBlank() && targetName && firmware.startsWith("3."))
+            if (!profileCompatible) {
                 _lastError.value = "호환되지 않는 SPP 기기입니다: ${profile.ifBlank { board.ifBlank { "STATUS profile 없음" } }}"
                 disconnectGeneration(myGeneration, clearIdentity = false)
                 return
             }
 
             if (protocol != EXPECTED_PROTOCOL) {
+                val legacyControlCapable = targetName && firmware.startsWith("3.")
                 val legacyOtaCapable = firmware.startsWith("3.2.") && json.optBoolean("ota", false) && legacyKey.isNotBlank()
-                if (!legacyOtaCapable) {
-                    _lastError.value = "펌웨어 protocol 불일치: P$protocol · 필요한 버전 P$EXPECTED_PROTOCOL (FW 3.3.0 필요)."
+                if (!legacyControlCapable) {
+                    _lastError.value = "펌웨어 protocol 불일치: P$protocol · 필요한 버전 P$EXPECTED_PROTOCOL (v4 권장)."
                     disconnectGeneration(myGeneration, clearIdentity = false)
                     return
                 }
@@ -407,7 +411,12 @@ class ClassicBluetoothManager(context: Context) {
                 _btStatusResponse.value = json
                 json.optString("ssid").takeIf { it.isNotBlank() }?.let { _wifiProvisionedSsid.value = it }
                 json.optString("ip").takeIf { it.isNotBlank() && it != "0.0.0.0" }?.let { _wifiConnectedIp.value = it }
-                _legacyUpgradeAvailable.value = true
+                _connectedDeviceAddress.value?.takeIf { it.isNotBlank() }?.let { verifiedAddress ->
+                    prefs.edit().putString(PREF_LAST_ADDRESS, verifiedAddress).apply()
+                }
+                _legacyUpgradeAvailable.value = legacyOtaCapable
+                _linkVerified.value = true
+                _connectionState.value = ConnectionState.CONNECTED
                 _lastError.value = null
                 handshakeJob?.cancel()
                 handshakeJob = null
@@ -470,9 +479,8 @@ class ClassicBluetoothManager(context: Context) {
     }
 
     /**
-     * Legacy firmware is deliberately restricted to migration-only commands. W:/X are needed to
-     * move a 3.2.x board onto the phone's normal LAN so the built-in HTTP /api/ota path can be used
-     * when ArduinoOTA reverse TCP is broken in the core used by that firmware.
+     * Recovery-only escape hatch retained for 3.2.x boards. Normal driving now remains available
+     * on original 3.x firmware as long as the STATUS handshake identifies ESP32_CAM_RC.
      */
     fun sendLegacyUpgradeCommand(command: String) {
         if (!_legacyUpgradeAvailable.value || socket == null || outputStream == null) return
