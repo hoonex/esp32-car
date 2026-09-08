@@ -388,7 +388,7 @@ private fun VisionOfflineCard(
         }
         !cameraReady && hasErrorCode -> {
             title = "OV2640 camera is not ready"
-            detail = "초기화 오류 0x${cameraError.toUInt().toString(16).uppercase()} · 시도 $attempts회 · HTTP ${if (httpReady) "online" else "offline"}"
+            detail = "초기화 오류 0x${cameraError.toUInt().toString(16).uppercase()} · 시도 ${attempts}회 · HTTP ${if (httpReady) "online" else "offline"}"
         }
         !cameraReady -> {
             title = "Camera service is unavailable"
