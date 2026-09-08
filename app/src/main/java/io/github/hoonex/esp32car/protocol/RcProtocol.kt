@@ -43,5 +43,6 @@ object RcProtocol {
     const val STATUS = "STATUS"
     const val SWITCH_TO_WIFI = "X"
     const val START_OTA_AP = "U"
+    const val CAMERA_RETRY = "K"
     const val REBOOT = "REBOOT"
 }

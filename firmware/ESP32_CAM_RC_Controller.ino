@@ -1,12 +1,11 @@
-// ESP32 Car firmware v3.3.1
+// ESP32 Car firmware v3.3.2
 // Target: AI Thinker ESP32-CAM + OV2640 + 2WD chassis + L298N four-input motor driver
-// Motor wiring profile: LEFT GPIO13/12, RIGHT GPIO14/15, flash LED GPIO4
+// Architecture: Bluetooth SPP is the primary/safety control link. Wi-Fi is used for vision, diagnostics and OTA.
 
 #include <Arduino.h>
 #include "esp_camera.h"
 #include <WiFi.h>
 #include "esp_http_server.h"
-#include "img_converters.h"
 #include "BluetoothSerial.h"
 #include <Preferences.h>
 #include <ArduinoOTA.h>
@@ -38,7 +37,7 @@ static const int MOTOR_L_PIN_1 = 13;
 static const int MOTOR_L_PIN_2 = 12;
 static const int FLASH_LED_PIN = 4;
 
-// Keep camera XCLK on LEDC channel 0. Motor PWM is explicitly placed on 4..7.
+// Camera owns LEDC channel/timer 0. Keep motor/flash PWM away from it.
 static const int CH_FLASH = 2;
 static const int CH_L1 = 4;
 static const int CH_L2 = 5;
@@ -48,13 +47,15 @@ static const int MOTOR_PWM_FREQ = 18000;
 static const int LED_PWM_FREQ = 5000;
 static const int PWM_BITS = 8;
 
-static const char* FW_VERSION = "3.3.1";
+static const char* FW_VERSION = "3.3.2";
 static const int PROTOCOL_VERSION = 2;
 static const char* HARDWARE_PROFILE = "AI_THINKER_ESP32_CAM_2WD_L298N";
 static const char* UPDATE_AP_SSID = "ESP32-CAR-UPDATE";
 static const char* UPDATE_AP_PASSWORD = "esp32car";
 static const uint32_t DRIVE_DEADMAN_MS = 450;
 static const int DEFAULT_STREAM_FPS = 12;
+static const uint32_t CAMERA_AUTO_RETRY_MS = 12000;
+static const uint32_t CAMERA_AUTO_RETRY_LIMIT = 4;
 
 Preferences preferences;
 BluetoothSerial SerialBT;
@@ -89,6 +90,11 @@ int streamFps = DEFAULT_STREAM_FPS;
 httpd_handle_t cameraHttpd = NULL;
 httpd_handle_t streamHttpd = NULL;
 sensor_t* cameraSensor = NULL;
+esp_err_t cameraInitError = ESP_OK;
+uint32_t cameraInitAttempts = 0;
+uint32_t cameraFramesServed = 0;
+uint32_t lastCameraRetryMs = 0;
+uint32_t cameraXclkHz = 20000000;
 
 // ===== Preferences =====
 void loadWifiCredentials() {
@@ -237,8 +243,20 @@ esp_err_t sendUnauthorized(httpd_req_t* req) {
 }
 
 // ===== Camera =====
-void ensureCamera() {
-  if (cameraStarted) return;
+bool ensureCamera(bool conservative = false) {
+  if (cameraStarted) return true;
+
+  cameraInitAttempts++;
+  cameraXclkHz = conservative ? 10000000 : 20000000;
+
+  if (conservative) {
+    // A short sensor power-cycle recovers marginal boots and loose-start conditions on many ESP32-CAM boards.
+    pinMode(PWDN_GPIO_NUM, OUTPUT);
+    digitalWrite(PWDN_GPIO_NUM, HIGH);
+    delay(80);
+    digitalWrite(PWDN_GPIO_NUM, LOW);
+    delay(80);
+  }
 
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -259,13 +277,13 @@ void ensureCamera() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = cameraXclkHz;
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
     config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 10;
-    config.fb_count = 2;
+    config.jpeg_quality = conservative ? 12 : 10;
+    config.fb_count = conservative ? 1 : 2;
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_LATEST;
   } else {
@@ -275,16 +293,29 @@ void ensureCamera() {
     config.fb_location = CAMERA_FB_IN_DRAM;
   }
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("[CAM] init failed: 0x%x\n", err);
-    return;
+  cameraInitError = esp_camera_init(&config);
+  if (cameraInitError != ESP_OK) {
+    cameraStarted = false;
+    cameraSensor = NULL;
+    Serial.printf(
+      "[CAM] init attempt %lu failed: 0x%x (%lu Hz XCLK)\n",
+      (unsigned long)cameraInitAttempts,
+      cameraInitError,
+      (unsigned long)cameraXclkHz
+    );
+    return false;
   }
 
   cameraSensor = esp_camera_sensor_get();
   if (cameraSensor) cameraSensor->set_vflip(cameraSensor, 1);
   cameraStarted = true;
-  Serial.println("[CAM] AI Thinker OV2640 ready");
+  cameraInitError = ESP_OK;
+  Serial.printf(
+    "[CAM] OV2640 ready on attempt %lu (%lu Hz XCLK)\n",
+    (unsigned long)cameraInitAttempts,
+    (unsigned long)cameraXclkHz
+  );
+  return true;
 }
 
 static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=frame";
@@ -314,6 +345,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
       break;
     }
     esp_camera_fb_return(fb);
+    cameraFramesServed++;
 
     const uint32_t frameBudgetMs = 1000U / (uint32_t)constrain(streamFps, 5, 20);
     uint32_t elapsed = millis() - frameStartedAt;
@@ -325,10 +357,13 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 static esp_err_t captureHandler(httpd_req_t* req) {
   if (!controlAuthorized(req)) return sendUnauthorized(req);
   if (!cameraStarted) {
+    String json = "{\"ok\":false,\"error\":\"camera_unavailable\",\"camera_error\":" +
+      String((int)cameraInitError) + ",\"camera_attempts\":" + String(cameraInitAttempts) + "}";
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"camera_unavailable\"}");
+    return httpd_resp_send(req, json.c_str(), json.length());
   }
+
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return httpd_resp_send_500(req);
   httpd_resp_set_type(req, "image/jpeg");
@@ -336,7 +371,33 @@ static esp_err_t captureHandler(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   esp_err_t result = httpd_resp_send(req, (const char*)fb->buf, fb->len);
   esp_camera_fb_return(fb);
+  if (result == ESP_OK) cameraFramesServed++;
   return result;
+}
+
+bool startStreamServer() {
+  if (!cameraStarted) return false;
+  if (streamHttpd != NULL) return true;
+
+  httpd_config_t streamConfig = HTTPD_DEFAULT_CONFIG();
+  streamConfig.server_port = 81;
+  streamConfig.ctrl_port = 32766;
+  if (httpd_start(&streamHttpd, &streamConfig) != ESP_OK) {
+    streamHttpd = NULL;
+    Serial.println("[HTTP] failed to start camera stream server on :81");
+    return false;
+  }
+
+  httpd_uri_t streamUri = { .uri = "/stream", .method = HTTP_GET, .handler = streamHandler, .user_ctx = NULL };
+  httpd_register_uri_handler(streamHttpd, &streamUri);
+  Serial.println("[HTTP] camera stream server ready on :81");
+  return true;
+}
+
+bool retryCamera() {
+  lastCameraRetryMs = millis();
+  if (!cameraStarted && !ensureCamera(true)) return false;
+  return startStreamServer();
 }
 
 String statusJson(bool includeKey) {
@@ -345,9 +406,12 @@ String statusJson(bool includeKey) {
   String ssid = stationConnected ? WiFi.SSID() : (recoveryApActive ? String(UPDATE_AP_SSID) : String(""));
   long rssi = stationConnected ? WiFi.RSSI() : 0;
   String mode = stationConnected ? "WIFI_STA" : (recoveryApActive ? "RECOVERY_AP" : "BT");
+
   String json = "{";
   json += "\"protocol\":" + String(PROTOCOL_VERSION) + ",";
   json += "\"mode\":\"" + mode + "\",";
+  json += "\"control_transport\":\"bluetooth\",";
+  json += "\"vision_transport\":\"wifi\",";
   json += "\"ip\":\"" + ip + "\",";
   json += "\"ssid\":\"" + ssid + "\",";
   json += "\"rssi\":" + String(rssi) + ",";
@@ -367,8 +431,13 @@ String statusJson(bool includeKey) {
   json += "\"deadman_trips\":" + String(deadmanTrips) + ",";
   json += "\"stream_fps\":" + String(streamFps) + ",";
   json += "\"camera\":" + String(cameraStarted ? "true" : "false") + ",";
+  json += "\"camera_error\":" + String((int)cameraInitError) + ",";
+  json += "\"camera_attempts\":" + String(cameraInitAttempts) + ",";
+  json += "\"camera_xclk_hz\":" + String(cameraXclkHz) + ",";
+  json += "\"camera_frames\":" + String(cameraFramesServed) + ",";
   json += "\"http_ready\":" + String(cameraHttpd != NULL ? "true" : "false") + ",";
   json += "\"stream_ready\":" + String(streamHttpd != NULL ? "true" : "false") + ",";
+  json += "\"capture_ready\":" + String((cameraHttpd != NULL && cameraStarted) ? "true" : "false") + ",";
   json += "\"spp_connected\":" + String(sppClientConnected ? "true" : "false") + ",";
   json += "\"ota\":true";
   if (includeKey) json += ",\"ota_key\":\"" + otaKey + "\"";
@@ -395,15 +464,12 @@ static esp_err_t actionHandler(httpd_req_t* req) {
   char value[48];
   bool configChanged = false;
 
-  if (httpd_query_key_value(query, "light", value, sizeof(value)) == ESP_OK) {
+  if (httpd_query_key_value(query, "light", value, sizeof(value)) == ESP_OK)
     ledcWrite(FLASH_LED_PIN, constrain(atoi(value), 0, 255));
-  }
-  if (httpd_query_key_value(query, "speed", value, sizeof(value)) == ESP_OK) {
+  if (httpd_query_key_value(query, "speed", value, sizeof(value)) == ESP_OK)
     currentSpeed = constrain(atoi(value), 50, 255);
-  }
-  if (httpd_query_key_value(query, "trim", value, sizeof(value)) == ESP_OK) {
+  if (httpd_query_key_value(query, "trim", value, sizeof(value)) == ESP_OK)
     currentTrim = constrain(atoi(value), -50, 50);
-  }
 
   char leftValue[16], rightValue[16];
   bool hasLeft = httpd_query_key_value(query, "left", leftValue, sizeof(leftValue)) == ESP_OK;
@@ -448,6 +514,13 @@ static esp_err_t actionHandler(httpd_req_t* req) {
 
   if (httpd_query_key_value(query, "go", value, sizeof(value)) == ESP_OK) {
     if (!strcmp(value, "STATUS")) {
+      String json = statusJson(false);
+      free(query);
+      httpd_resp_set_type(req, "application/json");
+      return httpd_resp_send(req, json.c_str(), json.length());
+    }
+    if (!strcmp(value, "CAMERA_RETRY")) {
+      retryCamera();
       String json = statusJson(false);
       free(query);
       httpd_resp_set_type(req, "application/json");
@@ -536,17 +609,16 @@ static esp_err_t otaUploadHandler(httpd_req_t* req) {
 static esp_err_t indexHandler(httpd_req_t* req) {
   const char* page =
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>body{background:#080b10;color:#fff;font-family:sans-serif;margin:24px}</style></head>"
-    "<body><h2>ESP32 Car 3.3.1</h2><p>AI Thinker ESP32-CAM · 2WD L298N</p>"
-    "<p>Control, camera and diagnostics require the per-device key delivered over Bluetooth. Use the Android app.</p></body></html>";
+    "<style>body{background:#090b0e;color:#f5f7f8;font-family:sans-serif;margin:24px}small{color:#8c969f}</style></head>"
+    "<body><h2>ESP32 Car 3.3.2</h2><p>Bluetooth control · Wi-Fi vision/OTA</p>"
+    "<small>Use the Android app for authenticated control, camera diagnostics and firmware updates.</small></body></html>";
   httpd_resp_set_type(req, "text/html");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   return httpd_resp_sendstr(req, page);
 }
 
 void startServers() {
-  // Critical recovery invariant: port 80 must not depend on OV2640 initialization.
-  // A broken/unplugged camera must still leave status and HTTP OTA reachable.
+  // Recovery invariant: port 80 is independent of camera initialization.
   if (cameraHttpd == NULL) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
@@ -569,23 +641,8 @@ void startServers() {
     }
   }
 
-  // Camera is best-effort. Its failure must not tear down or block the OTA server above.
-  ensureCamera();
-  if (cameraStarted && streamHttpd == NULL) {
-    httpd_config_t streamConfig = HTTPD_DEFAULT_CONFIG();
-    streamConfig.server_port = 81;
-    streamConfig.ctrl_port = 32766;
-    if (httpd_start(&streamHttpd, &streamConfig) == ESP_OK) {
-      httpd_uri_t streamUri = { .uri = "/stream", .method = HTTP_GET, .handler = streamHandler, .user_ctx = NULL };
-      httpd_register_uri_handler(streamHttpd, &streamUri);
-      Serial.println("[HTTP] camera stream server ready on :81");
-    } else {
-      streamHttpd = NULL;
-      Serial.println("[HTTP] failed to start camera stream server on :81");
-    }
-  }
-
-  // For recovery semantics, the essential server is port 80 only.
+  // Vision is best-effort and may recover later without affecting drive/OTA.
+  if (ensureCamera(false)) startStreamServer();
   serversStarted = (cameraHttpd != NULL);
 }
 
@@ -634,6 +691,7 @@ void startRecoveryAp() {
   motorsStop();
   WiFi.mode(WIFI_AP_STA);
   if (!WiFi.softAP(UPDATE_AP_SSID, UPDATE_AP_PASSWORD)) {
+    wifiOnline = false;
     Serial.println("[WIFI] failed to start recovery AP");
     return;
   }
@@ -686,11 +744,19 @@ void processBluetoothCommand(String cmd) {
   if (cmd == "X") {
     bool ok = connectWifiAndStart();
     SerialBT.println(ok ? "OK:WIFI_CONNECTED:" + WiFi.localIP().toString() : "OK:RECOVERY_AP:192.168.4.1");
+    SerialBT.println(statusJson(true));
     return;
   }
   if (cmd == "U") {
     startRecoveryAp();
     SerialBT.println("OK:OTA_AP:192.168.4.1");
+    SerialBT.println(statusJson(true));
+    return;
+  }
+  if (cmd == "K" || cmd == "CAMERA_RETRY") {
+    bool ok = retryCamera();
+    SerialBT.println(ok ? "OK:CAMERA_READY" : "ERR:CAMERA_INIT:" + String((int)cameraInitError));
+    SerialBT.println(statusJson(true));
     return;
   }
   if (cmd == "REBOOT") {
@@ -752,6 +818,9 @@ void handleSerialCommand(String cmd) {
     }
   } else if (cmd == "STATUS") {
     Serial.println(statusJson(false));
+  } else if (cmd == "CAMERA_RETRY") {
+    retryCamera();
+    Serial.println(statusJson(false));
   } else if (cmd == "STOP") {
     motorsStop();
   }
@@ -770,6 +839,7 @@ void setup() {
   Serial.printf("\nESP32 Car FW %s\n", FW_VERSION);
   Serial.printf("Board: AI Thinker ESP32-CAM\nProfile: %s\n", HARDWARE_PROFILE);
   Serial.printf("Protocol: %d\n", PROTOCOL_VERSION);
+  Serial.println("Links: Bluetooth=drive/safety, Wi-Fi=vision/OTA");
   Serial.println("Pins: L=13/12 R=14/15 flash=4");
   Serial.printf("Deadman: %u ms\n", DRIVE_DEADMAN_MS);
   Serial.printf("Bluetooth: %s\n", btReady ? "ready" : "FAILED");
@@ -797,6 +867,17 @@ void loop() {
 
   if (otaStarted) ArduinoOTA.handle();
 
+  // Camera is not allowed to take the drive link down. Retry transient camera boot failures independently.
+  if (
+    wifiOnline &&
+    !cameraStarted &&
+    cameraInitAttempts > 0 &&
+    cameraInitAttempts < CAMERA_AUTO_RETRY_LIMIT &&
+    millis() - lastCameraRetryMs > CAMERA_AUTO_RETRY_MS
+  ) {
+    retryCamera();
+  }
+
   while (SerialBT.available()) {
     char c = SerialBT.read();
     if (c == '\n') {
@@ -804,7 +885,7 @@ void loop() {
       btBuffer = "";
     } else if (c != '\r') {
       btBuffer += c;
-      if (btBuffer.length() > 160) btBuffer = "";
+      if (btBuffer.length() > 192) btBuffer = "";
     }
   }
 
@@ -815,7 +896,7 @@ void loop() {
       serialBuffer = "";
     } else if (c != '\r') {
       serialBuffer += c;
-      if (serialBuffer.length() > 160) serialBuffer = "";
+      if (serialBuffer.length() > 192) serialBuffer = "";
     }
   }
 
