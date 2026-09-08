@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -83,7 +84,7 @@ fun PremiumPilotCockpitScreen(viewModel: RcViewModel) {
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(232.dp)
+                    .height(360.dp)
             )
         }
     }
@@ -107,8 +108,24 @@ private fun TwoHandDriveHud(viewModel: RcViewModel, modifier: Modifier = Modifie
                     Brush.verticalGradient(
                         listOf(
                             Color.Transparent,
-                            Color(0x66070A0D),
-                            Color(0xE6070A0D),
+                            Color.Transparent,
+                            Color(0x77070A0D),
+                            Color(0xF5070A0D)
+                        )
+                    )
+                )
+        )
+
+        Box(
+            Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxHeight()
+                .width(if (compact) 300.dp else 360.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(0x44070A0D),
+                            Color(0xD8070A0D),
                             Color(0xFF070A0D)
                         )
                     )
