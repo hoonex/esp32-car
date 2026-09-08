@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -59,6 +58,8 @@ private val HudText = Color(0xFFF4F6F7)
 private val HudMuted = Color(0xFF87929A)
 private val HudAccent = Color(0xFF65D6B3)
 private val HudBlue = Color(0xFF63C9F2)
+private val HudWarning = Color(0xFFE8B86A)
+private val HudBg = Color(0xFF070A0D)
 
 enum class DriveControlMode(val storage: String, val label: String, val hint: String) {
     ARCADE("ARCADE", "RC", "왼손 가속 · 오른손 조향"),
@@ -81,10 +82,7 @@ fun PremiumPilotCockpitScreen(viewModel: RcViewModel) {
         if (btState == ConnectionState.CONNECTED) {
             TwoHandDriveHud(
                 viewModel = viewModel,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(360.dp)
+                modifier = Modifier.fillMaxSize()
             )
         }
     }
@@ -93,43 +91,73 @@ fun PremiumPilotCockpitScreen(viewModel: RcViewModel) {
 @Composable
 private fun TwoHandDriveHud(viewModel: RcViewModel, modifier: Modifier = Modifier) {
     val speed by viewModel.speed.collectAsStateWithLifecycle()
+    val btStatus by viewModel.bluetooth.btStatusResponse.collectAsStateWithLifecycle()
+    val wifiStatus by viewModel.wifiStatus.collectAsStateWithLifecycle()
     var mode by remember { mutableStateOf(DriveControlMode.fromStorage(viewModel.settings.controlMode)) }
 
     BoxWithConstraints(modifier) {
         val compact = maxWidth < 720.dp
         val sidePadding = if (compact) 16.dp else 28.dp
         val rightClearance = if (compact) 140.dp else 166.dp
+        val topClearance = if (compact) 70.dp else 84.dp
         val controlSize = if (compact) 112.dp else 124.dp
+        val status = wifiStatus ?: btStatus
+        val cameraReady = status?.optBoolean("camera", false) ?: false
+        val streamReady = status?.optBoolean("stream_ready", false) ?: false
+        val httpReady = status?.optBoolean("http_ready", false) ?: false
+        val visionUnavailable = !cameraReady || (!streamReady && !httpReady)
 
+        // The legacy cockpit still owns camera/settings/rail logic. When vision is down,
+        // cover its large diagnostic card with a deliberately quiet driving canvas.
+        if (visionUnavailable) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = topClearance, end = rightClearance)
+                    .background(HudBg)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp),
+                    color = HudSurfaceSoft,
+                    shape = RoundedCornerShape(999.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, HudLine)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("VISION OFFLINE", color = HudWarning, fontSize = 6.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+                        Text("Bluetooth control active", color = HudMuted, fontSize = 6.sp)
+                    }
+                }
+            }
+        }
+
+        // Permanent lower scrim removes the old telemetry/drive surface from the visual hierarchy.
         Box(
             Modifier
-                .fillMaxSize()
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .height(174.dp)
+                .padding(end = rightClearance)
                 .background(
                     Brush.verticalGradient(
-                        listOf(
-                            Color.Transparent,
-                            Color.Transparent,
-                            Color(0x77070A0D),
-                            Color(0xF5070A0D)
-                        )
+                        listOf(Color.Transparent, Color(0xD8070A0D), HudBg)
                     )
                 )
         )
 
+        // Catch taps in the footprint of the obsolete single-stick control. New controls are
+        // rendered later and therefore own their actual hit regions.
         Box(
             Modifier
                 .align(Alignment.BottomStart)
-                .fillMaxHeight()
-                .width(if (compact) 300.dp else 360.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color(0x44070A0D),
-                            Color(0xD8070A0D),
-                            Color(0xFF070A0D)
-                        )
-                    )
-                )
+                .width(if (compact) 190.dp else 220.dp)
+                .height(178.dp)
+                .background(Color.Transparent)
                 .pointerInput(Unit) {
                     awaitPointerEventScope {
                         while (true) awaitPointerEvent()
