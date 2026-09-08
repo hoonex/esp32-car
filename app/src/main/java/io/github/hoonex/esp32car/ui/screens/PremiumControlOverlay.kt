@@ -1,6 +1,7 @@
 package io.github.hoonex.esp32car.ui.screens
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -8,7 +9,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,14 +31,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,14 +51,13 @@ import kotlinx.coroutines.isActive
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-private val HudSurface = Color(0xE60B0F13)
-private val HudSurfaceSoft = Color(0xCC11171C)
+private val HudSurface = Color(0xF20B0F13)
+private val HudSurfaceSoft = Color(0xE611171C)
 private val HudLine = Color(0x2AFFFFFF)
 private val HudText = Color(0xFFF4F6F7)
 private val HudMuted = Color(0xFF87929A)
 private val HudAccent = Color(0xFF65D6B3)
 private val HudBlue = Color(0xFF63C9F2)
-private val HudDanger = Color(0xFFE75D69)
 
 enum class DriveControlMode(val storage: String, val label: String, val hint: String) {
     ARCADE("ARCADE", "RC", "왼손 가속 · 오른손 조향"),
@@ -83,7 +83,7 @@ fun PremiumPilotCockpitScreen(viewModel: RcViewModel) {
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(250.dp)
+                    .height(232.dp)
             )
         }
     }
@@ -96,20 +96,28 @@ private fun TwoHandDriveHud(viewModel: RcViewModel, modifier: Modifier = Modifie
 
     BoxWithConstraints(modifier) {
         val compact = maxWidth < 720.dp
-        val sidePadding = if (compact) 18.dp else 30.dp
-        val rightClearance = if (compact) 142.dp else 168.dp
-        val controlSize = if (compact) 132.dp else 154.dp
+        val sidePadding = if (compact) 16.dp else 28.dp
+        val rightClearance = if (compact) 140.dp else 166.dp
+        val controlSize = if (compact) 112.dp else 124.dp
 
-        ModeDock(
-            mode = mode,
-            onMode = {
-                viewModel.emergencyStop()
-                mode = it
-                viewModel.settings.controlMode = it.storage
-            },
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 4.dp)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color(0x66070A0D),
+                            Color(0xE6070A0D),
+                            Color(0xFF070A0D)
+                        )
+                    )
+                )
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) awaitPointerEvent()
+                    }
+                }
         )
 
         when (mode) {
@@ -118,10 +126,10 @@ private fun TwoHandDriveHud(viewModel: RcViewModel, modifier: Modifier = Modifie
                 controlSize = controlSize,
                 leftModifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = sidePadding, bottom = 14.dp),
+                    .padding(start = sidePadding, bottom = 12.dp),
                 rightModifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = rightClearance, bottom = 14.dp)
+                    .padding(end = rightClearance, bottom = 12.dp)
             )
 
             DriveControlMode.TANK -> TankTwoHandControl(
@@ -129,10 +137,10 @@ private fun TwoHandDriveHud(viewModel: RcViewModel, modifier: Modifier = Modifie
                 controlSize = controlSize,
                 leftModifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = sidePadding, bottom = 14.dp),
+                    .padding(start = sidePadding, bottom = 12.dp),
                 rightModifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = rightClearance, bottom = 14.dp)
+                    .padding(end = rightClearance, bottom = 12.dp)
             )
 
             DriveControlMode.DPAD -> PadTwoHandControl(
@@ -140,22 +148,35 @@ private fun TwoHandDriveHud(viewModel: RcViewModel, modifier: Modifier = Modifie
                 controlSize = controlSize,
                 leftModifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(start = sidePadding, bottom = 14.dp),
+                    .padding(start = sidePadding, bottom = 12.dp),
                 rightModifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = rightClearance, bottom = 14.dp)
+                    .padding(end = rightClearance, bottom = 12.dp)
             )
         }
 
-        PowerDock(
-            speed = speed,
-            onSpeed = viewModel::updateSpeed,
-            onMax = { viewModel.updateSpeed(255f) },
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 18.dp)
-                .width(if (compact) 190.dp else 230.dp)
-        )
+                .padding(bottom = 13.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            PowerDock(
+                speed = speed,
+                onSpeed = viewModel::updateSpeed,
+                onMax = { viewModel.updateSpeed(255f) },
+                modifier = Modifier.width(if (compact) 174.dp else 198.dp)
+            )
+            ModeDock(
+                mode = mode,
+                onMode = {
+                    viewModel.emergencyStop()
+                    mode = it
+                    viewModel.settings.controlMode = it.storage
+                }
+            )
+        }
     }
 }
 
@@ -164,13 +185,13 @@ private fun ModeDock(mode: DriveControlMode, onMode: (DriveControlMode) -> Unit,
     Surface(
         modifier = modifier,
         color = HudSurface,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(15.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, HudLine),
-        shadowElevation = 12.dp
+        shadowElevation = 8.dp
     ) {
         Row(
-            Modifier.padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            Modifier.padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             DriveControlMode.entries.forEach { item ->
@@ -179,15 +200,15 @@ private fun ModeDock(mode: DriveControlMode, onMode: (DriveControlMode) -> Unit,
                     onClick = { onMode(item) },
                     color = if (active) HudBlue.copy(alpha = 0.18f) else Color.Transparent,
                     contentColor = if (active) HudBlue else HudMuted,
-                    shape = RoundedCornerShape(13.dp)
+                    shape = RoundedCornerShape(11.dp)
                 ) {
-                    Column(
-                        Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(item.label, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-                        Text(item.hint, fontSize = 5.5.sp, color = if (active) HudBlue.copy(alpha = 0.78f) else HudMuted)
-                    }
+                    Text(
+                        item.label,
+                        modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.4.sp
+                    )
                 }
             }
         }
@@ -206,35 +227,21 @@ private fun PowerDock(
     Surface(
         modifier = modifier,
         color = HudSurface,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(15.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, HudLine),
-        shadowElevation = 10.dp
+        shadowElevation = 8.dp
     ) {
-        Column(Modifier.padding(horizontal = 13.dp, vertical = 9.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("OUTPUT", color = HudMuted, fontSize = 6.sp, letterSpacing = 1.sp)
-                    Text("$percent%", color = HudText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                }
-                Surface(
-                    onClick = onMax,
-                    color = if (speed >= 254f) HudAccent.copy(alpha = 0.16f) else HudSurfaceSoft,
-                    contentColor = if (speed >= 254f) HudAccent else HudText,
-                    shape = RoundedCornerShape(11.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (speed >= 254f) HudAccent.copy(alpha = 0.35f) else HudLine
-                    )
-                ) {
-                    Text(
-                        "MAX",
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Column(Modifier.width(38.dp)) {
+                Text("POWER", color = HudMuted, fontSize = 5.sp, letterSpacing = 0.7.sp)
+                Text("$percent%", color = HudText, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
             Slider(
+                modifier = Modifier.weight(1f),
                 value = speed,
                 onValueChange = onSpeed,
                 valueRange = 50f..255f,
@@ -244,6 +251,23 @@ private fun PowerDock(
                     inactiveTrackColor = HudLine
                 )
             )
+            Surface(
+                onClick = onMax,
+                color = if (speed >= 254f) HudAccent.copy(alpha = 0.16f) else HudSurfaceSoft,
+                contentColor = if (speed >= 254f) HudAccent else HudText,
+                shape = RoundedCornerShape(10.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (speed >= 254f) HudAccent.copy(alpha = 0.35f) else HudLine
+                )
+            ) {
+                Text(
+                    "MAX",
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    fontSize = 6.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -251,7 +275,7 @@ private fun PowerDock(
 @Composable
 private fun RcTwoHandControl(
     viewModel: RcViewModel,
-    controlSize: androidx.compose.ui.unit.Dp,
+    controlSize: Dp,
     leftModifier: Modifier,
     rightModifier: Modifier
 ) {
@@ -267,7 +291,7 @@ private fun RcTwoHandControl(
         vertical = true,
         label = "THROTTLE",
         accent = HudAccent,
-        modifier = leftModifier.width(controlSize).height(controlSize + 26.dp),
+        modifier = leftModifier.width(controlSize).height(controlSize + 30.dp),
         onValue = { throttle = it },
         onActive = { throttleActive = it }
     )
@@ -277,7 +301,7 @@ private fun RcTwoHandControl(
         vertical = false,
         label = "STEER",
         accent = HudBlue,
-        modifier = rightModifier.width(controlSize + 26.dp).height(controlSize),
+        modifier = rightModifier.width(controlSize + 30.dp).height(controlSize),
         onValue = { steering = it },
         onActive = { steeringActive = it }
     )
@@ -286,7 +310,7 @@ private fun RcTwoHandControl(
 @Composable
 private fun TankTwoHandControl(
     viewModel: RcViewModel,
-    controlSize: androidx.compose.ui.unit.Dp,
+    controlSize: Dp,
     leftModifier: Modifier,
     rightModifier: Modifier
 ) {
@@ -304,7 +328,7 @@ private fun TankTwoHandControl(
         vertical = true,
         label = "LEFT MOTOR",
         accent = HudAccent,
-        modifier = leftModifier.width(controlSize).height(controlSize + 26.dp),
+        modifier = leftModifier.width(controlSize).height(controlSize + 30.dp),
         onValue = { left = it },
         onActive = { leftActive = it }
     )
@@ -314,7 +338,7 @@ private fun TankTwoHandControl(
         vertical = true,
         label = "RIGHT MOTOR",
         accent = HudAccent,
-        modifier = rightModifier.width(controlSize).height(controlSize + 26.dp),
+        modifier = rightModifier.width(controlSize).height(controlSize + 30.dp),
         onValue = { right = it },
         onActive = { rightActive = it }
     )
@@ -323,7 +347,7 @@ private fun TankTwoHandControl(
 @Composable
 private fun PadTwoHandControl(
     viewModel: RcViewModel,
-    controlSize: androidx.compose.ui.unit.Dp,
+    controlSize: Dp,
     leftModifier: Modifier,
     rightModifier: Modifier
 ) {
@@ -346,17 +370,17 @@ private fun PadTwoHandControl(
     DrivePump(viewModel, throttle, steering, engaged)
 
     Surface(
-        modifier = leftModifier.width(controlSize + 30.dp).height(controlSize),
+        modifier = leftModifier.width(controlSize + 28.dp).height(controlSize),
         color = HudSurface,
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(22.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, HudLine),
-        shadowElevation = 10.dp
+        shadowElevation = 8.dp
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("STEER", color = HudMuted, fontSize = 6.sp, letterSpacing = 1.sp)
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text("STEER", color = HudMuted, fontSize = 5.5.sp, letterSpacing = 0.8.sp)
             Row(
                 Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 PressTile("‹", leftPressed, { leftPressed = it }, Modifier.weight(1f))
@@ -366,14 +390,14 @@ private fun PadTwoHandControl(
     }
 
     Surface(
-        modifier = rightModifier.width(controlSize).height(controlSize + 30.dp),
+        modifier = rightModifier.width(controlSize).height(controlSize + 28.dp),
         color = HudSurface,
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(22.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, HudLine),
-        shadowElevation = 10.dp
+        shadowElevation = 8.dp
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("THROTTLE", color = HudMuted, fontSize = 6.sp, letterSpacing = 1.sp)
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text("THROTTLE", color = HudMuted, fontSize = 5.5.sp, letterSpacing = 0.8.sp)
             PressTile("▲", forwardPressed, { forwardPressed = it }, Modifier.weight(1f).fillMaxWidth())
             PressTile("▼", reversePressed, { reversePressed = it }, Modifier.weight(1f).fillMaxWidth())
         }
@@ -408,8 +432,8 @@ private fun AxisControl(
     val density = LocalDensity.current
     val travelPx = remember(size, density, vertical) {
         with(density) {
-            if (vertical) ((size.height / density.density) * 0.34f).dp.toPx()
-            else ((size.width / density.density) * 0.34f).dp.toPx()
+            if (vertical) ((size.height / density.density) * 0.32f).dp.toPx()
+            else ((size.width / density.density) * 0.32f).dp.toPx()
         }
     }
 
@@ -448,42 +472,42 @@ private fun AxisControl(
                 )
             },
         color = HudSurface,
-        shape = RoundedCornerShape(28.dp),
+        shape = RoundedCornerShape(24.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, HudLine),
-        shadowElevation = 10.dp
+        shadowElevation = 8.dp
     ) {
         Box(Modifier.fillMaxSize()) {
             Canvas(Modifier.fillMaxSize()) {
-                val pad = 18.dp.toPx()
+                val pad = 15.dp.toPx()
                 if (vertical) {
                     drawLine(HudLine, Offset(center.x, pad), Offset(center.x, size.height - pad), 2.dp.toPx())
-                    drawLine(HudLine, Offset(center.x - 12.dp.toPx(), center.y), Offset(center.x + 12.dp.toPx(), center.y), 1.dp.toPx())
+                    drawLine(HudLine, Offset(center.x - 10.dp.toPx(), center.y), Offset(center.x + 10.dp.toPx(), center.y), 1.dp.toPx())
                 } else {
                     drawLine(HudLine, Offset(pad, center.y), Offset(size.width - pad, center.y), 2.dp.toPx())
-                    drawLine(HudLine, Offset(center.x, center.y - 12.dp.toPx()), Offset(center.x, center.y + 12.dp.toPx()), 1.dp.toPx())
+                    drawLine(HudLine, Offset(center.x, center.y - 10.dp.toPx()), Offset(center.x, center.y + 10.dp.toPx()), 1.dp.toPx())
                 }
             }
 
             Text(
                 label,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
                 color = HudMuted,
-                fontSize = 6.sp,
+                fontSize = 5.5.sp,
                 fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.8.sp
+                letterSpacing = 0.7.sp
             )
 
             Surface(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .size(if (vertical) 54.dp else 58.dp)
+                    .size(if (vertical) 46.dp else 48.dp)
                     .graphicsLayer {
                         if (vertical) translationY = -value * travelPx else translationX = value * travelPx
                     },
                 color = if (value == 0f) Color(0xFF263038) else accent,
                 contentColor = if (value == 0f) HudText else Color(0xFF081411),
                 shape = CircleShape,
-                shadowElevation = if (value == 0f) 2.dp else 8.dp
+                shadowElevation = if (value == 0f) 2.dp else 7.dp
             ) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
@@ -500,7 +524,7 @@ private fun AxisControl(
                                 else -> "•"
                             }
                         },
-                        fontSize = 20.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -512,9 +536,9 @@ private fun AxisControl(
                     value < -0.05f -> "${(value * 100).roundToInt()}"
                     else -> "0"
                 },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 7.dp),
                 color = if (value == 0f) HudMuted else accent,
-                fontSize = 6.sp,
+                fontSize = 5.5.sp,
                 fontWeight = FontWeight.Bold
             )
         }
@@ -544,11 +568,11 @@ private fun PressTile(
             },
         color = if (active) HudAccent else HudSurfaceSoft,
         contentColor = if (active) Color(0xFF071511) else HudText,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, if (active) HudAccent.copy(alpha = 0.45f) else HudLine)
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(text, textAlign = TextAlign.Center, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(text, textAlign = TextAlign.Center, fontSize = 21.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
