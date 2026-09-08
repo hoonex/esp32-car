@@ -21,9 +21,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +39,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     private val rcViewModel: RcViewModel by viewModels()
@@ -51,11 +52,11 @@ class MainActivity : ComponentActivity() {
         hideSystemBars()
 
         // Deliberately no automatic APK updater here. Until a persistent release signer is
-        // configured, self-update is not trustworthy and should not interfere with driving.
+        // configured, self-update is not trustworthy and must never interfere with driving.
         setContent {
             MyApplicationTheme {
                 BluetoothPermissionGate {
-                    FreshCarScreen(rcViewModel)
+                    ControllerRoot(rcViewModel)
                 }
             }
         }
@@ -85,15 +86,23 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+private fun ControllerRoot(viewModel: RcViewModel) {
+    // One automatic recovery attempt per app session. A remembered board reconnects without
+    // making the driver revisit the device picker; a first-time install immediately starts scan.
+    LaunchedEffect(Unit) {
+        delay(250)
+        if (!viewModel.reconnectLast()) {
+            viewModel.scanBluetooth()
+        }
+    }
+    FreshCarScreen(viewModel)
+}
+
+@Composable
 private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     val context = LocalContext.current
 
     fun requiredPermissions(): Array<String> = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.NEARBY_WIFI_DEVICES
-        )
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT
@@ -132,13 +141,13 @@ private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
             ) {
                 Text("ESP32 CAR", color = Color.White, fontWeight = FontWeight.Black, fontSize = 22.sp)
                 Text(
-                    if (requestedOnce) "Bluetooth / Nearby devices 권한을 허용해야 연결할 수 있습니다."
-                    else "ESP32_CAM_RC 연결을 위해 Bluetooth / Nearby devices 권한이 필요합니다.",
+                    if (requestedOnce) "Bluetooth 권한을 허용해야 ESP32_CAM_RC에 연결할 수 있습니다."
+                    else "ESP32_CAM_RC 검색과 연결에 Bluetooth 권한이 필요합니다.",
                     color = Color(0xFF8D98A3),
                     fontSize = 11.sp
                 )
                 Button(onClick = { launcher.launch(requiredPermissions()) }) {
-                    Text("권한 허용")
+                    Text("Bluetooth 권한 허용")
                 }
             }
         }
