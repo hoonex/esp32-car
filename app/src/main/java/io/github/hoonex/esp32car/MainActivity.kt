@@ -37,12 +37,15 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.protocol.RcProtocol
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
+import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val rcViewModel: RcViewModel by viewModels()
@@ -54,8 +57,14 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        // Deliberately no automatic APK updater here. Until a persistent release signer is
-        // configured, self-update is not trustworthy and must never interfere with driving.
+        // Official GitHub Android releases are checked on every app launch. The updater downloads
+        // the APK itself, validates package/version/SHA-256/signing certificate, then opens the
+        // Android package installer. Leaving this Activity for the installer also triggers
+        // onStop(), so the car receives an emergency stop before an app replacement can occur.
+        lifecycleScope.launch {
+            AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
+        }
+
         setContent {
             MyApplicationTheme {
                 BluetoothPermissionGate {
@@ -68,6 +77,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
+        // Android 8+ requires a one-time per-app "install unknown apps" permission. If the updater
+        // sent the user to that system page, continue the already-downloaded update immediately.
+        AppUpdater.resumePendingInstall(this)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
