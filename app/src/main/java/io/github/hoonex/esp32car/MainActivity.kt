@@ -1,6 +1,7 @@
 package io.github.hoonex.esp32car
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -36,13 +37,14 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import io.github.hoonex.esp32car.ui.screens.LegacyFirmwareUpgradeScreen
-import io.github.hoonex.esp32car.ui.screens.PremiumAppScreen
+import io.github.hoonex.esp32car.bluetooth.ConnectionState
+import io.github.hoonex.esp32car.protocol.RcProtocol
+import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -55,6 +57,10 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
+        // Official GitHub Android releases are checked on every app launch. The updater downloads
+        // the APK itself, validates package/version/SHA-256/signing certificate, then opens the
+        // Android package installer. Leaving this Activity for the installer also triggers
+        // onStop(), so the car receives an emergency stop before an app replacement can occur.
         lifecycleScope.launch {
             AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
         }
@@ -62,13 +68,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 BluetoothPermissionGate {
-                    val legacyUpgradeAvailable by rcViewModel.bluetooth.legacyUpgradeAvailable.collectAsStateWithLifecycle()
-                    val legacyMigrationSession by rcViewModel.legacyMigrationSession.collectAsStateWithLifecycle()
-                    if (legacyUpgradeAvailable || legacyMigrationSession) {
-                        LegacyFirmwareUpgradeScreen(rcViewModel)
-                    } else {
-                        PremiumAppScreen(rcViewModel)
-                    }
+                    ControllerRoot(rcViewModel)
                 }
             }
         }
@@ -77,6 +77,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
+        // Android 8+ requires a one-time per-app "install unknown apps" permission. If the updater
+        // sent the user to that system page, continue the already-downloaded update immediately.
         AppUpdater.resumePendingInstall(this)
     }
 
@@ -98,16 +100,44 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@SuppressLint("MissingPermission")
+@Composable
+private fun ControllerRoot(viewModel: RcViewModel) {
+    // No setup screen for a car the phone already knows. Prefer the last verified board, then an
+    // already-paired ESP32_CAM_RC. If either automatic attempt fails, discovery starts by itself.
+    LaunchedEffect(Unit) {
+        delay(250)
+
+        var attempted = viewModel.reconnectLast()
+        if (!attempted) {
+            val pairedCar = viewModel.pairedDevices().firstOrNull { device ->
+                runCatching { device.name }.getOrNull()?.equals(RcProtocol.DEVICE_NAME, ignoreCase = true) == true
+            }
+            if (pairedCar != null) {
+                viewModel.pairAndConnect(pairedCar)
+                attempted = true
+            }
+        }
+
+        if (!attempted) {
+            viewModel.scanBluetooth()
+        } else {
+            // RFCOMM connect + STATUS handshake has a bounded timeout. Recover from a stale saved
+            // device address automatically instead of leaving the app stranded on a dead spinner.
+            delay(5_000)
+            if (viewModel.bluetooth.connectionState.value == ConnectionState.DISCONNECTED) {
+                viewModel.scanBluetooth()
+            }
+        }
+    }
+    FreshCarScreen(viewModel)
+}
+
 @Composable
 private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     val context = LocalContext.current
 
     fun requiredPermissions(): Array<String> = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.NEARBY_WIFI_DEVICES
-        )
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> arrayOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT
@@ -138,21 +168,21 @@ private fun BluetoothPermissionGate(content: @Composable () -> Unit) {
     if (granted) {
         content()
     } else {
-        Box(Modifier.fillMaxSize().background(Color(0xFF070A0E))) {
+        Box(Modifier.fillMaxSize().background(Color(0xFF080A0D))) {
             Column(
                 modifier = Modifier.align(Alignment.Center).padding(28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("BLUETOOTH / LOCAL NETWORK PERMISSION", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
+                Text("ESP32 CAR", color = Color.White, fontWeight = FontWeight.Black, fontSize = 22.sp)
                 Text(
-                    if (requestedOnce) "Nearby devices 권한이 꺼져 있어 ESP32_CAM_RC 및 로컬 OTA 통신을 사용할 수 없습니다."
-                    else "ESP32_CAM_RC 검색과 로컬 OTA 통신에는 Nearby devices 권한이 필요합니다.",
-                    color = Color(0xFF9AA5AF),
-                    fontSize = 12.sp
+                    if (requestedOnce) "Bluetooth 권한을 허용해야 ESP32_CAM_RC에 연결할 수 있습니다."
+                    else "ESP32_CAM_RC 검색과 연결에 Bluetooth 권한이 필요합니다.",
+                    color = Color(0xFF8D98A3),
+                    fontSize = 11.sp
                 )
                 Button(onClick = { launcher.launch(requiredPermissions()) }) {
-                    Text("권한 허용")
+                    Text("Bluetooth 권한 허용")
                 }
             }
         }

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- FreshCarScreen is reachable only after MainActivity verifies BLUETOOTH_CONNECT. -->
+    <issue id="MissingPermission">
+        <ignore path="src/main/java/io/github/hoonex/esp32car/ui/screens/FreshCarScreen.kt" />
+    </issue>
+</lint>
