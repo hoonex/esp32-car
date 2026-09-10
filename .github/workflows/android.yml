@@ -154,18 +154,30 @@ jobs:
           cp .ci-firmware/manifest.json app/src/main/assets/firmware/manifest.json
           test -s app/src/main/assets/firmware/esp32-car.bin
 
-      - name: Verify automatic app updater contract
+      - name: Verify manual app updater contract
         shell: bash
         run: |
           set -euo pipefail
+          MAIN='app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt'
+          UPDATER='app/src/main/java/io/github/hoonex/esp32car/update/AppUpdater.kt'
+          UI='app/src/main/java/io/github/hoonex/esp32car/ui/components/AppUpdateControl.kt'
+
           grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' app/src/main/AndroidManifest.xml
           grep -F 'androidx.core.content.FileProvider' app/src/main/AndroidManifest.xml
           grep -F '<files-path name="app_updates" path="app-updates/"' app/src/main/res/xml/file_paths.xml
-          grep -F 'AppUpdater.restoreStagedUpdate(this)' app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt
-          grep -F 'installWhenReady = false' app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt
-          grep -F 'AppUpdateStage.WAITING_PERMISSION' app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt
-          grep -F 'KEY_STAGED_APK' app/src/main/java/io/github/hoonex/esp32car/update/AppUpdater.kt
-          grep -F 'signingDigests(current) == signingDigests(archive)' app/src/main/java/io/github/hoonex/esp32car/update/AppUpdater.kt
+          grep -F 'AppUpdater.restoreStagedUpdate(this)' "$MAIN"
+          grep -F 'AppUpdater.checkForUpdate(this@MainActivity)' "$MAIN"
+          ! grep -F 'installWhenReady' "$MAIN" "$UPDATER"
+          ! grep -F 'AppUpdater.installReadyUpdate(this@MainActivity)' "$MAIN"
+          grep -F 'AVAILABLE' "$UPDATER"
+          grep -F 'suspend fun downloadAvailableUpdate(activity: Activity)' "$UPDATER"
+          grep -F 'KEY_STAGED_APK' "$UPDATER"
+          grep -F 'signingDigests(current) == signingDigests(archive)' "$UPDATER"
+          grep -F 'AppUpdater.downloadAvailableUpdate(target)' "$UI"
+          grep -F 'AppUpdater.installReadyUpdate(target)' "$UI"
+          grep -F '현재 버전' "$UI"
+          grep -F '최신 버전' "$UI"
+          grep -F '정지 · 연결 해제 후 설치' "$UI"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
