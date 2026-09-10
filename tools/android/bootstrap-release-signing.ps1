@@ -93,8 +93,8 @@ function Set-GitHubSecretExact {
     }
 }
 
-$resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
-$secretFile = [System.IO.Path]::GetFullPath(".github-release-signing.env")
+$resolvedOutput = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+$secretFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(".github-release-signing.env")
 $hasKeystore = Test-Path $resolvedOutput
 $hasSecretFile = Test-Path $secretFile
 
