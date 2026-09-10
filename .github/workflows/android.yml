@@ -135,9 +135,6 @@ jobs:
     needs: firmware
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    outputs:
-      apk_artifact: ${{ steps.apk_meta.outputs.artifact_name }}
-      persistent_signing: ${{ steps.signing.outputs.available }}
 
     steps:
       - name: Checkout
@@ -190,203 +187,18 @@ jobs:
       - name: Test, lint, and assemble debug APK
         run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Prepare persistent release signing
-        id: signing
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - name: Stage CI debug APK
         shell: bash
-        env:
-          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
-          ANDROID_KEYSTORE_PASSWORD_SECRET: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS_SECRET: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD_SECRET: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -n "$ANDROID_KEYSTORE_B64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD_SECRET" ] && [ -n "$ANDROID_KEY_ALIAS_SECRET" ] && [ -n "$ANDROID_KEY_PASSWORD_SECRET" ]; then
-            KEYSTORE="$RUNNER_TEMP/esp32-car-release.jks"
-            printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
-            test -s "$KEYSTORE"
-            echo "ANDROID_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
-            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD_SECRET" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS_SECRET" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD_SECRET" >> "$GITHUB_ENV"
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "Persistent Android signing secrets are not configured; official Android release will be skipped."
-          fi
-
-      - name: Build persistent-signed release APK
-        if: steps.signing.outputs.available == 'true'
-        run: gradle :app:assembleRelease --stacktrace --no-daemon
-
-      - name: Select APK artifact
-        id: apk_meta
-        shell: bash
-        env:
-          SIGNED: ${{ steps.signing.outputs.available }}
         run: |
           set -euo pipefail
           mkdir -p app/build/ci-apk
-          if [ "$SIGNED" = "true" ]; then
-            cp app/build/outputs/apk/release/app-release.apk app/build/ci-apk/app.apk
-            echo "artifact_name=esp32-car-release-apk" >> "$GITHUB_OUTPUT"
-            echo "kind=persistent-signed-release" >> "$GITHUB_OUTPUT"
-          else
-            cp app/build/outputs/apk/debug/app-debug.apk app/build/ci-apk/app.apk
-            echo "artifact_name=esp32-car-test-debug-apk" >> "$GITHUB_OUTPUT"
-            echo "kind=ephemeral-debug-test-only" >> "$GITHUB_OUTPUT"
-          fi
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/ci-apk/app.apk
           test -s app/build/ci-apk/app.apk
-
-      - name: Verify bundled firmware and APK signature
-        shell: bash
-        env:
-          SIGNED: ${{ steps.signing.outputs.available }}
-        run: |
-          set -euo pipefail
-          unzip -l app/build/ci-apk/app.apk | grep 'assets/firmware/esp32-car.bin'
-          unzip -l app/build/ci-apk/app.apk | grep 'assets/firmware/manifest.json'
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs app/build/ci-apk/app.apk
-          if [ "$SIGNED" = "true" ]; then
-            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose app/build/ci-apk/app.apk
-          fi
 
-      - name: Upload Android APK
+      - name: Upload Android CI APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.apk_meta.outputs.artifact_name }}
+          name: esp32-car-test-debug-apk
           path: app/build/ci-apk/app.apk
           if-no-files-found: error
-
-  release-android:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.android.outputs.persistent_signing == 'true'
-    needs: [firmware, android]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Resolve Android release version
-        id: release_meta
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          VERSION="$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -n1)"
-          test -n "$VERSION"
-          TAG="android-v${VERSION}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download persistent-signed Android APK
-        if: steps.release_meta.outputs.exists != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.android.outputs.apk_artifact }}
-          path: release/android
-
-      - name: Download existing published APK without replacing it
-        if: steps.release_meta.outputs.exists == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release_meta.outputs.tag }}
-          APP_VERSION: ${{ steps.release_meta.outputs.version }}
-        run: |
-          mkdir -p release/android
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "ESP32-Car-v${APP_VERSION}.apk" \
-            --dir release/android
-
-      - name: Download firmware bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: esp32-car-firmware
-          path: release/firmware
-
-      - name: Prepare release assets
-        shell: bash
-        env:
-          APP_VERSION: ${{ steps.release_meta.outputs.version }}
-          FW_VERSION: ${{ needs.firmware.outputs.version }}
-          RELEASE_EXISTS: ${{ steps.release_meta.outputs.exists }}
-        run: |
-          set -euo pipefail
-          if [ "$RELEASE_EXISTS" = "true" ]; then
-            cp "release/android/ESP32-Car-v${APP_VERSION}.apk" "release/ESP32-Car-v${APP_VERSION}.apk"
-          else
-            mv release/android/app.apk "release/ESP32-Car-v${APP_VERSION}.apk"
-          fi
-          cp release/firmware/firmware.bin "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin"
-          cp release/firmware/manifest.json release/firmware-manifest.json
-          (
-            cd release
-            sha256sum \
-              "ESP32-Car-v${APP_VERSION}.apk" \
-              "ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
-              firmware-manifest.json > SHA256SUMS.txt
-          )
-          cat > release/RELEASE_NOTES.md <<EOF
-          ESP32 Car Android v${APP_VERSION}
-
-          - Persistent-signed official Android APK for the in-app automatic update channel
-          - Automatic release check, verified background download, persistent staging, and safe deferred installation
-          - Android package/version/SHA-256/signing-certificate validation before installation
-          - Installation is deferred while Bluetooth driving is connected
-          - Bluetooth SPP driving remains compatible with the original v3.x firmware
-          - Wi-Fi camera/status and authenticated HTTP OTA remain independent from Bluetooth driving
-          - First-install/recovery remains the Arduino IDE .ino path; unverified Windows flasher packages are not published
-
-          Built from main commit ${GITHUB_SHA}.
-          ESP32 firmware: ${FW_VERSION}.
-          Hardware: AI Thinker ESP32-CAM, 4MB flash, 2WD L298N profile.
-          EOF
-
-      - name: Publish new GitHub Release
-        if: steps.release_meta.outputs.exists != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release_meta.outputs.tag }}
-          APP_VERSION: ${{ steps.release_meta.outputs.version }}
-          FW_VERSION: ${{ needs.firmware.outputs.version }}
-        run: |
-          set -euo pipefail
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "ESP32 Car Android v${APP_VERSION}" \
-            --notes-file release/RELEASE_NOTES.md \
-            "release/ESP32-Car-v${APP_VERSION}.apk" \
-            "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
-            release/firmware-manifest.json \
-            release/SHA256SUMS.txt
-
-      - name: Repair existing release firmware assets without replacing APK
-        if: steps.release_meta.outputs.exists == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release_meta.outputs.tag }}
-          APP_VERSION: ${{ steps.release_meta.outputs.version }}
-          FW_VERSION: ${{ needs.firmware.outputs.version }}
-        run: |
-          set -euo pipefail
-          gh release upload "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber \
-            "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
-            release/firmware-manifest.json \
-            release/SHA256SUMS.txt
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release/RELEASE_NOTES.md
