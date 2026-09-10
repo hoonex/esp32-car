@@ -42,9 +42,11 @@ import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.protocol.RcProtocol
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
+import io.github.hoonex.esp32car.update.AppUpdateStage
 import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -57,12 +59,27 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        // Official GitHub Android releases are checked on every app launch. The updater downloads
-        // the APK itself, validates package/version/SHA-256/signing certificate, then opens the
-        // Android package installer. Leaving this Activity for the installer also triggers
-        // onStop(), so the car receives an emergency stop before an app replacement can occur.
+        // Update flow:
+        // 1) check GitHub official Android releases automatically,
+        // 2) download + validate the APK in-app,
+        // 3) install automatically as soon as the car is not actively connected.
+        //
+        // This deliberately does NOT pop Android's package installer in the middle of a drive.
+        // When the controller is connected the verified APK stays staged; disconnecting (or the
+        // next launch before reconnect) opens the system installer. Android still requires the
+        // normal package-install confirmation unless this phone is a managed/root device.
         lifecycleScope.launch {
-            AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
+            AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = false)
+        }
+
+        lifecycleScope.launch {
+            combine(AppUpdater.state, rcViewModel.bluetooth.connectionState) { update, connection ->
+                update to connection
+            }.collect { (update, connection) ->
+                if (update.stage == AppUpdateStage.READY && connection == ConnectionState.DISCONNECTED) {
+                    AppUpdater.installReadyUpdate(this@MainActivity)
+                }
+            }
         }
 
         setContent {
@@ -77,8 +94,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
-        // Android 8+ requires a one-time per-app "install unknown apps" permission. If the updater
-        // sent the user to that system page, continue the already-downloaded update immediately.
+        // Android 8+ asks once whether this app may install downloaded APKs. Returning from that
+        // settings page resumes the already-staged update without requiring a download link.
         AppUpdater.resumePendingInstall(this)
     }
 
