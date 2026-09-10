@@ -1,0 +1,143 @@
+name: Dispatch Trusted Android Release
+
+on:
+  workflow_run:
+    workflows:
+      - Build Android + Firmware
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Release the current validated main build or only refresh the signing cache
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - keepalive
+  schedule:
+    - cron: '23 4 * * 1,4'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: android-release-dispatch
+  cancel-in-progress: true
+
+env:
+  SIGNING_ANCHOR_TAG: android-signing-v1
+  TRUSTED_WORKFLOW: android-release-trusted.yml
+
+jobs:
+  dispatch:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve trusted source and validated run
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          MANUAL_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          MAIN_SHA="$(git rev-parse origin/main)"
+
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            SOURCE_SHA="$WORKFLOW_RUN_HEAD_SHA"
+            VALIDATED_RUN_ID="$WORKFLOW_RUN_ID"
+            MODE="release"
+            if [ "$SOURCE_SHA" != "$MAIN_SHA" ]; then
+              echo "::error::Validated source $SOURCE_SHA was superseded by main $MAIN_SHA; refusing stale release dispatch."
+              exit 1
+            fi
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            SOURCE_SHA="$MAIN_SHA"
+            VALIDATED_RUN_ID=""
+            MODE="keepalive"
+          else
+            SOURCE_SHA="$MAIN_SHA"
+            MODE="${MANUAL_MODE:-release}"
+            VALIDATED_RUN_ID=""
+            if [ "$MODE" = "release" ]; then
+              VALIDATED_RUN_ID="$(
+                gh run list \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow android.yml \
+                  --branch main \
+                  --event push \
+                  --status success \
+                  --limit 50 \
+                  --json databaseId,headSha \
+                  --jq ".[] | select(.headSha == \"$SOURCE_SHA\") | .databaseId" \
+                  | head -n 1
+              )"
+              if [ -z "$VALIDATED_RUN_ID" ]; then
+                echo "::error::No successful Build Android + Firmware push run validates current main $SOURCE_SHA."
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "validated_run_id=$VALIDATED_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Trusted source: $SOURCE_SHA"
+          echo "Mode: $MODE"
+          [ -z "$VALIDATED_RUN_ID" ] || echo "Validated run: $VALIDATED_RUN_ID"
+
+      - name: Create or verify immutable signing anchor
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/$SIGNING_ANCHOR_TAG" >/dev/null; then
+            ANCHOR_SHA="$(git rev-list -n 1 "$SIGNING_ANCHOR_TAG")"
+            git cat-file -e "$ANCHOR_SHA:.github/workflows/$TRUSTED_WORKFLOW"
+            echo "Signing anchor already exists at $ANCHOR_SHA."
+          else
+            git cat-file -e "$SOURCE_SHA:.github/workflows/$TRUSTED_WORKFLOW"
+            git tag "$SIGNING_ANCHOR_TAG" "$SOURCE_SHA"
+            git push origin "refs/tags/$SIGNING_ANCHOR_TAG"
+            echo "Created signing anchor $SIGNING_ANCHOR_TAG at $SOURCE_SHA."
+          fi
+
+      - name: Dispatch tag-scoped trusted signer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          VALIDATED_RUN_ID: ${{ steps.source.outputs.validated_run_id }}
+          MODE: ${{ steps.source.outputs.mode }}
+        run: |
+          set -euo pipefail
+          gh workflow run "$TRUSTED_WORKFLOW" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$SIGNING_ANCHOR_TAG" \
+            -f "mode=$MODE" \
+            -f "source_sha=$SOURCE_SHA" \
+            -f "validated_run_id=$VALIDATED_RUN_ID"
+          echo "Dispatched $TRUSTED_WORKFLOW on tag $SIGNING_ANCHOR_TAG for $SOURCE_SHA."
