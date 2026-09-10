@@ -157,6 +157,19 @@ jobs:
           cp .ci-firmware/manifest.json app/src/main/assets/firmware/manifest.json
           test -s app/src/main/assets/firmware/esp32-car.bin
 
+      - name: Verify automatic app updater contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'android.permission.REQUEST_INSTALL_PACKAGES' app/src/main/AndroidManifest.xml
+          grep -F 'androidx.core.content.FileProvider' app/src/main/AndroidManifest.xml
+          grep -F '<files-path name="app_updates" path="app-updates/"' app/src/main/res/xml/file_paths.xml
+          grep -F 'AppUpdater.restoreStagedUpdate(this)' app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt
+          grep -F 'installWhenReady = false' app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt
+          grep -F 'AppUpdateStage.WAITING_PERMISSION' app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt
+          grep -F 'KEY_STAGED_APK' app/src/main/java/io/github/hoonex/esp32car/update/AppUpdater.kt
+          grep -F 'signingDigests(current) == signingDigests(archive)' app/src/main/java/io/github/hoonex/esp32car/update/AppUpdater.kt
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -179,7 +192,7 @@ jobs:
 
       - name: Prepare persistent release signing
         id: signing
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         shell: bash
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -245,71 +258,9 @@ jobs:
           path: app/build/ci-apk/app.apk
           if-no-files-found: error
 
-  windows-installer:
-    if: github.event_name != 'pull_request'
-    needs: firmware
-    runs-on: windows-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download firmware bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: esp32-car-firmware
-          path: firmware-bundle
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Build one-click flasher
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller esptool==5.0.2 pyserial
-          pyinstaller --noconfirm --clean --onefile --noconsole --collect-all esptool --collect-all serial --name ESP32-Car-Installer tools/flasher/flash_esp32.py
-          New-Item -ItemType Directory -Force -Path package/bundle | Out-Null
-          Copy-Item dist/ESP32-Car-Installer.exe package/ESP32-Car-Installer.exe
-          Copy-Item firmware-bundle/bootloader.bin package/bundle/bootloader.bin
-          Copy-Item firmware-bundle/partitions.bin package/bundle/partitions.bin
-          Copy-Item firmware-bundle/boot_app0.bin package/bundle/boot_app0.bin
-          Copy-Item firmware-bundle/firmware.bin package/bundle/firmware.bin
-          Copy-Item firmware-bundle/ESP32-CAM-AI-Thinker-2WD-factory.bin package/bundle/ESP32-CAM-AI-Thinker-2WD-factory.bin
-          Copy-Item firmware-bundle/flash_args.txt package/bundle/flash_args.txt
-          Copy-Item firmware-bundle/manifest.json package/bundle/manifest.json
-          Compress-Archive -Path package/* -DestinationPath ESP32-Car-First-Install-Windows.zip
-
-      - name: Verify first-install package contains all Arduino images
-        shell: pwsh
-        run: |
-          Expand-Archive ESP32-Car-First-Install-Windows.zip -DestinationPath verify-package
-          $required = @(
-            'verify-package/ESP32-Car-Installer.exe',
-            'verify-package/bundle/bootloader.bin',
-            'verify-package/bundle/partitions.bin',
-            'verify-package/bundle/boot_app0.bin',
-            'verify-package/bundle/firmware.bin',
-            'verify-package/bundle/flash_args.txt'
-          )
-          foreach ($path in $required) {
-            if (!(Test-Path $path)) { throw "Missing installer asset: $path" }
-          }
-          Select-String -Path verify-package/bundle/flash_args.txt -Pattern '^0xe000 boot_app0\.bin$'
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: esp32-car-first-install-windows
-          path: ESP32-Car-First-Install-Windows.zip
-          if-no-files-found: error
-
   release-android:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.android.outputs.persistent_signing == 'true'
-    needs: [firmware, android, windows-installer]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.android.outputs.persistent_signing == 'true'
+    needs: [firmware, android]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -358,12 +309,6 @@ jobs:
             --pattern "ESP32-Car-v${APP_VERSION}.apk" \
             --dir release/android
 
-      - name: Download Windows first-install package
-        uses: actions/download-artifact@v4
-        with:
-          name: esp32-car-first-install-windows
-          path: release/windows
-
       - name: Download firmware bundle
         uses: actions/download-artifact@v4
         with:
@@ -383,33 +328,25 @@ jobs:
           else
             mv release/android/app.apk "release/ESP32-Car-v${APP_VERSION}.apk"
           fi
-          mv release/windows/ESP32-Car-First-Install-Windows.zip "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip"
           cp release/firmware/firmware.bin "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin"
-          cp release/firmware/ESP32-CAM-AI-Thinker-2WD-factory.bin "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin"
           cp release/firmware/manifest.json release/firmware-manifest.json
-          cp release/firmware/flash_args.txt release/flash_args.txt
           (
             cd release
             sha256sum \
               "ESP32-Car-v${APP_VERSION}.apk" \
-              "ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
               "ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
-              "ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
-              firmware-manifest.json \
-              flash_args.txt > SHA256SUMS.txt
+              firmware-manifest.json > SHA256SUMS.txt
           )
           cat > release/RELEASE_NOTES.md <<EOF
           ESP32 Car Android v${APP_VERSION}
 
-          - Persistent-signed Android release APK; CI debug APKs are test-only and never published as official releases
-          - Manual, profile-verified Bluetooth SPP connection flow
-          - Conflated joystick commands to prevent stale motion backlog
-          - Landscape RC cockpit with ESP32-CAM video and Bluetooth/Wi-Fi control
-          - AI Thinker ESP32-CAM + 2WD L298N hardware profile
-          - ESP32-side dead-man failsafe and Bluetooth-disconnect emergency stop
-          - Authenticated Wi-Fi control and keyed OTA firmware update
-          - Post-reboot firmware-version verification after OTA
-          - First-install package matches Arduino ESP32 upload layout: 0x1000 bootloader, 0x8000 partitions, 0xE000 boot_app0, 0x10000 application
+          - Persistent-signed official Android APK for the in-app automatic update channel
+          - Automatic release check, verified background download, persistent staging, and safe deferred installation
+          - Android package/version/SHA-256/signing-certificate validation before installation
+          - Installation is deferred while Bluetooth driving is connected
+          - Bluetooth SPP driving remains compatible with the original v3.x firmware
+          - Wi-Fi camera/status and authenticated HTTP OTA remain independent from Bluetooth driving
+          - First-install/recovery remains the Arduino IDE .ino path; unverified Windows flasher packages are not published
 
           Built from main commit ${GITHUB_SHA}.
           ESP32 firmware: ${FW_VERSION}.
@@ -432,11 +369,8 @@ jobs:
             --title "ESP32 Car Android v${APP_VERSION}" \
             --notes-file release/RELEASE_NOTES.md \
             "release/ESP32-Car-v${APP_VERSION}.apk" \
-            "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
             "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
-            "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
             release/firmware-manifest.json \
-            release/flash_args.txt \
             release/SHA256SUMS.txt
 
       - name: Repair existing release firmware assets without replacing APK
@@ -452,10 +386,7 @@ jobs:
           gh release upload "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber \
-            "release/ESP32-Car-First-Install-Windows-v${APP_VERSION}.zip" \
             "release/ESP32-Car-AI-Thinker-2WD-OTA-v${FW_VERSION}.bin" \
-            "release/ESP32-Car-AI-Thinker-2WD-Factory-v${FW_VERSION}.bin" \
             release/firmware-manifest.json \
-            release/flash_args.txt \
             release/SHA256SUMS.txt
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file release/RELEASE_NOTES.md

@@ -42,9 +42,11 @@ import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.protocol.RcProtocol
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
+import io.github.hoonex.esp32car.update.AppUpdateStage
 import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -57,12 +59,25 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        // Official GitHub Android releases are checked on every app launch. The updater downloads
-        // the APK itself, validates package/version/SHA-256/signing certificate, then opens the
-        // Android package installer. Leaving this Activity for the installer also triggers
-        // onStop(), so the car receives an emergency stop before an app replacement can occur.
+        // A previously downloaded official APK is restored first. If no staged update exists,
+        // GitHub releases are checked and a newer APK is downloaded + validated in the background.
+        // Installation is only started while Bluetooth is disconnected so an app update can never
+        // tear down the controller in the middle of a drive.
+        val restoredStagedUpdate = AppUpdater.restoreStagedUpdate(this)
+        if (!restoredStagedUpdate) {
+            lifecycleScope.launch {
+                AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = false)
+            }
+        }
+
         lifecycleScope.launch {
-            AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = true)
+            combine(AppUpdater.state, rcViewModel.bluetooth.connectionState) { update, connection ->
+                update to connection
+            }.collect { (update, connection) ->
+                if (update.stage == AppUpdateStage.READY && connection == ConnectionState.DISCONNECTED) {
+                    AppUpdater.installReadyUpdate(this@MainActivity)
+                }
+            }
         }
 
         setContent {
@@ -77,8 +92,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
-        // Android 8+ requires a one-time per-app "install unknown apps" permission. If the updater
-        // sent the user to that system page, continue the already-downloaded update immediately.
+        // Android 8+ asks once whether this app may install downloaded APKs. Returning from that
+        // settings page resumes the already-staged update without requiring a download link.
         AppUpdater.resumePendingInstall(this)
     }
 
@@ -103,10 +118,30 @@ class MainActivity : ComponentActivity() {
 @SuppressLint("MissingPermission")
 @Composable
 private fun ControllerRoot(viewModel: RcViewModel) {
-    // No setup screen for a car the phone already knows. Prefer the last verified board, then an
-    // already-paired ESP32_CAM_RC. If either automatic attempt fails, discovery starts by itself.
+    // Give a fast release check a short priority window before connecting the car. A completed
+    // update opens the installer before Bluetooth is touched; a slow/offline update check never
+    // blocks driving for more than a few seconds and can finish in the background instead.
     LaunchedEffect(Unit) {
-        delay(250)
+        delay(150)
+
+        var checkingWaitMs = 0L
+        while (AppUpdater.state.value.stage == AppUpdateStage.CHECKING && checkingWaitMs < 900L) {
+            delay(100)
+            checkingWaitMs += 100
+        }
+
+        var downloadWaitMs = 0L
+        while (AppUpdater.state.value.stage == AppUpdateStage.DOWNLOADING && downloadWaitMs < 5_000L) {
+            delay(100)
+            downloadWaitMs += 100
+        }
+
+        when (AppUpdater.state.value.stage) {
+            AppUpdateStage.READY,
+            AppUpdateStage.WAITING_PERMISSION,
+            AppUpdateStage.INSTALLING -> return@LaunchedEffect
+            else -> Unit
+        }
 
         var attempted = viewModel.reconnectLast()
         if (!attempted) {

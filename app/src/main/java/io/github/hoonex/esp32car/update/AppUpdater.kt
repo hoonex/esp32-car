@@ -31,6 +31,7 @@ enum class AppUpdateStage {
     UP_TO_DATE,
     DOWNLOADING,
     READY,
+    WAITING_PERMISSION,
     INSTALLING,
     SIGNATURE_MISMATCH,
     ERROR
@@ -51,6 +52,8 @@ object AppUpdater {
     private const val PREFS = "app_updater"
     private const val KEY_WAITING_PERMISSION = "waiting_unknown_sources_permission"
     private const val KEY_PENDING_APK = "pending_apk_path"
+    private const val KEY_STAGED_APK = "staged_apk_path"
+    private const val KEY_STAGED_VERSION = "staged_apk_version"
 
     private val running = AtomicBoolean(false)
     private val _state = MutableStateFlow(AppUpdateState())
@@ -66,6 +69,55 @@ object AppUpdater {
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
+
+    /**
+     * Restore a previously downloaded and validated APK before doing any network work. This is the
+     * piece that makes the updater actually automatic across app restarts: if an update finished
+     * downloading while the car was connected, the next launch can open Android's installer before
+     * reconnecting the vehicle instead of downloading the same APK again.
+     */
+    fun restoreStagedUpdate(activity: Activity): Boolean {
+        val prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
+        val path = prefs.getString(KEY_STAGED_APK, null) ?: return false
+        val stagedVersion = prefs.getString(KEY_STAGED_VERSION, null).orEmpty()
+        val apk = File(path)
+
+        val updateRoot = updateDirectory(activity)
+        val canonicalRoot = runCatching { updateRoot.canonicalFile }.getOrNull()
+        val canonicalApk = runCatching { apk.canonicalFile }.getOrNull()
+        if (
+            canonicalRoot == null || canonicalApk == null ||
+            !canonicalApk.path.startsWith(canonicalRoot.path + File.separator) ||
+            !canonicalApk.isFile || canonicalApk.length() < 1024 * 1024
+        ) {
+            clearStagedUpdate(activity, deleteFile = true)
+            return false
+        }
+
+        val current = runCatching { currentPackageInfo(activity) }.getOrNull() ?: return false
+        val archive = archivePackageInfo(activity, canonicalApk)
+        if (
+            archive == null ||
+            archive.packageName != activity.packageName ||
+            PackageInfoCompat.getLongVersionCode(archive) <= PackageInfoCompat.getLongVersionCode(current) ||
+            signingDigests(current) != signingDigests(archive)
+        ) {
+            clearStagedUpdate(activity, deleteFile = true)
+            return false
+        }
+
+        readyApk = canonicalApk
+        val currentVersion = current.versionName.orEmpty().ifBlank { "0.0.0" }
+        val latestVersion = archive.versionName.orEmpty().ifBlank { stagedVersion.ifBlank { "new" } }
+        _state.value = AppUpdateState(
+            stage = AppUpdateStage.READY,
+            currentVersion = currentVersion,
+            latestVersion = latestVersion,
+            progress = 100,
+            message = "v$latestVersion 다운로드 완료 · 설치 대기"
+        )
+        return true
+    }
 
     /**
      * Called automatically at app startup. Only published, non-prerelease Android releases that
@@ -87,6 +139,7 @@ object AppUpdater {
             val release = withContext(Dispatchers.IO) { resolveLatestRelease(currentVersion) }
             if (release == null) {
                 readyApk = null
+                clearStagedUpdate(activity, deleteFile = true)
                 _state.value = AppUpdateState(
                     stage = AppUpdateStage.UP_TO_DATE,
                     currentVersion = currentVersion,
@@ -112,23 +165,27 @@ object AppUpdater {
             readyApk = downloaded.apk
 
             if (!downloaded.signatureMatches) {
+                downloaded.apk.delete()
+                readyApk = null
+                clearStagedUpdate(activity, deleteFile = false)
                 _state.value = AppUpdateState(
                     stage = AppUpdateStage.SIGNATURE_MISMATCH,
                     currentVersion = currentVersion,
                     latestVersion = release.version,
                     progress = 100,
-                    message = "업데이트 APK는 정상이나 현재 설치본과 서명이 다릅니다. 같은 영구 서명키로 배포된 설치본부터 자동 덮어쓰기가 가능합니다.",
+                    message = "현재 설치본과 공식 릴리즈의 Android 서명이 다릅니다. 최초 persistent-signed 설치본으로 한 번 전환하면 이후부터 자동 덮어쓰기가 가능합니다.",
                     releaseUrl = release.releaseUrl
                 )
                 return
             }
 
+            persistStagedUpdate(activity, downloaded.apk, release.version)
             _state.value = AppUpdateState(
                 stage = AppUpdateStage.READY,
                 currentVersion = currentVersion,
                 latestVersion = release.version,
                 progress = 100,
-                message = "v${release.version} 검증 완료 · 설치 준비됨",
+                message = "v${release.version} 검증 완료 · 안전한 시점에 자동 설치",
                 releaseUrl = release.releaseUrl
             )
 
@@ -155,14 +212,14 @@ object AppUpdater {
         if (apk == null || !apk.isFile || apk.length() <= 0) {
             _state.value = _state.value.copy(
                 stage = AppUpdateStage.ERROR,
-                message = "설치할 업데이트 APK가 없습니다. 다시 확인하세요."
+                message = "설치할 업데이트 APK가 없습니다. 다음 실행에서 다시 확인합니다."
             )
             return
         }
 
         if (_state.value.stage == AppUpdateStage.SIGNATURE_MISMATCH) {
             _state.value = _state.value.copy(
-                message = "서명이 다른 APK는 기존 앱 위에 설치할 수 없습니다. 공식 릴리즈 설치본을 확인하세요."
+                message = "서명이 다른 APK는 Android가 기존 앱 위에 설치하지 못합니다."
             )
             return
         }
@@ -185,7 +242,13 @@ object AppUpdater {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_WAITING_PERMISSION, false)) return
-        if (!activity.packageManager.canRequestPackageInstalls()) return
+        if (!activity.packageManager.canRequestPackageInstalls()) {
+            _state.value = _state.value.copy(
+                stage = AppUpdateStage.WAITING_PERMISSION,
+                message = "Android의 '알 수 없는 앱 설치' 권한 대기 중"
+            )
+            return
+        }
 
         val path = prefs.getString(KEY_PENDING_APK, null) ?: return
         val apk = File(path)
@@ -257,8 +320,8 @@ object AppUpdater {
 
         when (compareVersions(newest.version, currentVersion)) {
             -1 -> error(
-                "공식 자동업데이트 채널은 v${newest.version}까지 게시되어 있지만 현재 앱은 v${currentVersion}입니다. " +
-                    "이 설치본은 릴리즈보다 앞선 테스트 빌드입니다."
+                "공식 자동업데이트 채널은 v${newest.version}까지 게시되어 있지만 현재 앱은 v$currentVersion 입니다. " +
+                    "현재 설치본이 릴리즈보다 앞선 개발 빌드입니다."
             )
             0 -> return null
         }
@@ -274,7 +337,7 @@ object AppUpdater {
         current: PackageInfo,
         release: ReleaseInfo
     ): DownloadedUpdate {
-        val updateDir = File(activity.cacheDir, "app-updates").apply { mkdirs() }
+        val updateDir = updateDirectory(activity)
         val finalFile = File(updateDir, "ESP32-Car-v${release.version}.apk")
         val tempFile = File(updateDir, "download.tmp")
         if (tempFile.exists()) tempFile.delete()
@@ -317,7 +380,10 @@ object AppUpdater {
             }
         }
 
-        if (tempFile.length() < 1024 * 1024) error("다운로드된 APK가 비정상적으로 작습니다.")
+        if (tempFile.length() < 1024 * 1024) {
+            tempFile.delete()
+            error("다운로드된 APK가 비정상적으로 작습니다.")
+        }
         val magic = tempFile.inputStream().use { input -> ByteArray(4).also { input.read(it) } }
         if (!(magic[0] == 0x50.toByte() && magic[1] == 0x4B.toByte())) {
             tempFile.delete()
@@ -360,15 +426,15 @@ object AppUpdater {
                 .putBoolean(KEY_WAITING_PERMISSION, true)
                 .putString(KEY_PENDING_APK, apk.absolutePath)
                 .apply()
+            _state.value = _state.value.copy(
+                stage = AppUpdateStage.WAITING_PERMISSION,
+                message = "한 번만 '알 수 없는 앱 설치' 권한을 허용하면 이후 업데이트는 같은 흐름으로 진행됩니다."
+            )
             activity.startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     Uri.parse("package:${activity.packageName}")
                 )
-            )
-            _state.value = _state.value.copy(
-                stage = AppUpdateStage.READY,
-                message = "이 앱의 '알 수 없는 앱 설치'를 허용하면 업데이트가 계속됩니다."
             )
             return
         }
@@ -382,6 +448,29 @@ object AppUpdater {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         activity.startActivity(intent)
+    }
+
+    private fun updateDirectory(activity: Activity): File =
+        File(activity.filesDir, "app-updates").apply { mkdirs() }
+
+    private fun persistStagedUpdate(activity: Activity, apk: File, version: String) {
+        activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_STAGED_APK, apk.absolutePath)
+            .putString(KEY_STAGED_VERSION, version)
+            .apply()
+    }
+
+    private fun clearStagedUpdate(activity: Activity, deleteFile: Boolean) {
+        val prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
+        val path = prefs.getString(KEY_STAGED_APK, null)
+        if (deleteFile && !path.isNullOrBlank()) {
+            runCatching { File(path).delete() }
+        }
+        prefs.edit()
+            .remove(KEY_STAGED_APK)
+            .remove(KEY_STAGED_VERSION)
+            .apply()
     }
 
     private fun currentPackageInfo(activity: Activity): PackageInfo {
