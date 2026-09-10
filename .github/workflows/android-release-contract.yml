@@ -55,9 +55,18 @@ jobs:
 
           grep -F 'SIGNING_ANCHOR_TAG: android-signing-v1' "$DISPATCH"
           grep -F -- '--ref "$SIGNING_ANCHOR_TAG"' "$DISPATCH"
-          grep -F 'github.event.workflow_run.head_sha' "$DISPATCH"
-          grep -F 'github.event.workflow_run.head_branch == '\''main'\''' "$DISPATCH"
-          grep -F 'Validated source $SOURCE_SHA was superseded by main $MAIN_SHA' "$DISPATCH"
+          grep -F 'branches: [main]' "$DISPATCH"
+          grep -F 'PUSH_SHA: ${{ github.sha }}' "$DISPATCH"
+          grep -F -- '--workflow android.yml' "$DISPATCH"
+          grep -F -- '--event push' "$DISPATCH"
+          grep -F 'Waiting for Build Android + Firmware to validate $SOURCE_SHA' "$DISPATCH"
+          grep -F 'Build Android + Firmware run $RUN_ID completed with $RUN_CONCLUSION' "$DISPATCH"
+          grep -F 'Timed out waiting for a successful Build Android + Firmware push run for $SOURCE_SHA' "$DISPATCH"
+          grep -F 'Push source $PUSH_SHA was superseded by main $MAIN_SHA' "$DISPATCH"
+          if grep -Fq 'workflow_run:' "$DISPATCH"; then
+            echo '::error::Release dispatch must not depend on workflow_run delivery.'
+            exit 1
+          fi
 
           grep -F 'SIGNING_ANCHOR_TAG: android-signing-v1' "$TRUSTED"
           grep -F 'refs/tags/$SIGNING_ANCHOR_TAG' "$TRUSTED"
