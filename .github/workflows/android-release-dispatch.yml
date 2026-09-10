@@ -1,11 +1,8 @@
 name: Dispatch Trusted Android Release
 
 on:
-  workflow_run:
-    workflows:
-      - Build Android + Firmware
-    types:
-      - completed
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       mode:
@@ -33,15 +30,8 @@ env:
 
 jobs:
   dispatch:
-    if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main') ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out current main
@@ -56,58 +46,80 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          PUSH_SHA: ${{ github.sha }}
           MANUAL_MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
           MAIN_SHA="$(git rev-parse origin/main)"
+          PROCEED=true
 
-          if [ "$EVENT_NAME" = "workflow_run" ]; then
-            SOURCE_SHA="$WORKFLOW_RUN_HEAD_SHA"
-            VALIDATED_RUN_ID="$WORKFLOW_RUN_ID"
-            MODE="release"
-            if [ "$SOURCE_SHA" != "$MAIN_SHA" ]; then
-              echo "::error::Validated source $SOURCE_SHA was superseded by main $MAIN_SHA; refusing stale release dispatch."
-              exit 1
-            fi
-          elif [ "$EVENT_NAME" = "schedule" ]; then
+          if [ "$EVENT_NAME" = "schedule" ]; then
             SOURCE_SHA="$MAIN_SHA"
-            VALIDATED_RUN_ID=""
             MODE="keepalive"
-          else
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             SOURCE_SHA="$MAIN_SHA"
             MODE="${MANUAL_MODE:-release}"
-            VALIDATED_RUN_ID=""
-            if [ "$MODE" = "release" ]; then
-              VALIDATED_RUN_ID="$(
+          else
+            SOURCE_SHA="$PUSH_SHA"
+            MODE="release"
+            if [ "$SOURCE_SHA" != "$MAIN_SHA" ]; then
+              echo "Push source $PUSH_SHA was superseded by main $MAIN_SHA; skipping stale dispatch."
+              PROCEED=false
+            fi
+          fi
+
+          VALIDATED_RUN_ID=""
+          if [ "$PROCEED" = "true" ] && [ "$MODE" = "release" ]; then
+            echo "Waiting for Build Android + Firmware to validate $SOURCE_SHA..."
+            for attempt in $(seq 1 60); do
+              RUN_ROW="$(
                 gh run list \
                   --repo "$GITHUB_REPOSITORY" \
                   --workflow android.yml \
                   --branch main \
                   --event push \
-                  --status success \
                   --limit 50 \
-                  --json databaseId,headSha \
-                  --jq ".[] | select(.headSha == \"$SOURCE_SHA\") | .databaseId" \
+                  --json databaseId,headSha,status,conclusion \
+                  --jq ".[] | select(.headSha == \"$SOURCE_SHA\") | [.databaseId, .status, (.conclusion // \"\")] | @tsv" \
                   | head -n 1
               )"
-              if [ -z "$VALIDATED_RUN_ID" ]; then
-                echo "::error::No successful Build Android + Firmware push run validates current main $SOURCE_SHA."
-                exit 1
+
+              if [ -n "$RUN_ROW" ]; then
+                IFS=$'\t' read -r RUN_ID RUN_STATUS RUN_CONCLUSION <<< "$RUN_ROW"
+                echo "Validation run $RUN_ID: $RUN_STATUS ${RUN_CONCLUSION:-pending}"
+                if [ "$RUN_STATUS" = "completed" ]; then
+                  if [ "$RUN_CONCLUSION" = "success" ]; then
+                    VALIDATED_RUN_ID="$RUN_ID"
+                    break
+                  fi
+                  echo "::error::Build Android + Firmware run $RUN_ID completed with $RUN_CONCLUSION for $SOURCE_SHA."
+                  exit 1
+                fi
+              else
+                echo "Validation run for $SOURCE_SHA is not visible yet (attempt $attempt/60)."
               fi
+
+              sleep 10
+            done
+
+            if [ -z "$VALIDATED_RUN_ID" ]; then
+              echo "::error::Timed out waiting for a successful Build Android + Firmware push run for $SOURCE_SHA."
+              exit 1
             fi
           fi
 
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "validated_run_id=$VALIDATED_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
           echo "Trusted source: $SOURCE_SHA"
           echo "Mode: $MODE"
+          echo "Proceed: $PROCEED"
           [ -z "$VALIDATED_RUN_ID" ] || echo "Validated run: $VALIDATED_RUN_ID"
 
       - name: Create or verify immutable signing anchor
+        if: steps.source.outputs.proceed == 'true'
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
@@ -126,6 +138,7 @@ jobs:
           fi
 
       - name: Dispatch tag-scoped trusted signer
+        if: steps.source.outputs.proceed == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
