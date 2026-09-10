@@ -40,13 +40,12 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.protocol.RcProtocol
+import io.github.hoonex.esp32car.ui.components.AppUpdateControl
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
-import io.github.hoonex.esp32car.update.AppUpdateStage
 import io.github.hoonex.esp32car.update.AppUpdater
 import io.github.hoonex.esp32car.viewmodel.RcViewModel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -59,24 +58,13 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        // A previously downloaded official APK is restored first. If no staged update exists,
-        // GitHub releases are checked and a newer APK is downloaded + validated in the background.
-        // Installation is only started while Bluetooth is disconnected so an app update can never
-        // tear down the controller in the middle of a drive.
+        // Startup only checks release metadata. A newer APK is downloaded and installed only after
+        // the user explicitly presses the app update controls. A valid staged APK is restored but
+        // is never launched automatically.
         val restoredStagedUpdate = AppUpdater.restoreStagedUpdate(this)
         if (!restoredStagedUpdate) {
             lifecycleScope.launch {
-                AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = false)
-            }
-        }
-
-        lifecycleScope.launch {
-            combine(AppUpdater.state, rcViewModel.bluetooth.connectionState) { update, connection ->
-                update to connection
-            }.collect { (update, connection) ->
-                if (update.stage == AppUpdateStage.READY && connection == ConnectionState.DISCONNECTED) {
-                    AppUpdater.installReadyUpdate(this@MainActivity)
-                }
+                AppUpdater.checkForUpdate(this@MainActivity)
             }
         }
 
@@ -92,8 +80,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
-        // Android 8+ asks once whether this app may install downloaded APKs. Returning from that
-        // settings page resumes the already-staged update without requiring a download link.
+        // This only resumes an install that the user already requested before Android redirected to
+        // the unknown-sources permission screen.
         AppUpdater.resumePendingInstall(this)
     }
 
@@ -118,30 +106,9 @@ class MainActivity : ComponentActivity() {
 @SuppressLint("MissingPermission")
 @Composable
 private fun ControllerRoot(viewModel: RcViewModel) {
-    // Give a fast release check a short priority window before connecting the car. A completed
-    // update opens the installer before Bluetooth is touched; a slow/offline update check never
-    // blocks driving for more than a few seconds and can finish in the background instead.
+    // App update metadata checks no longer block or delay Bluetooth controller startup.
     LaunchedEffect(Unit) {
         delay(150)
-
-        var checkingWaitMs = 0L
-        while (AppUpdater.state.value.stage == AppUpdateStage.CHECKING && checkingWaitMs < 900L) {
-            delay(100)
-            checkingWaitMs += 100
-        }
-
-        var downloadWaitMs = 0L
-        while (AppUpdater.state.value.stage == AppUpdateStage.DOWNLOADING && downloadWaitMs < 5_000L) {
-            delay(100)
-            downloadWaitMs += 100
-        }
-
-        when (AppUpdater.state.value.stage) {
-            AppUpdateStage.READY,
-            AppUpdateStage.WAITING_PERMISSION,
-            AppUpdateStage.INSTALLING -> return@LaunchedEffect
-            else -> Unit
-        }
 
         var attempted = viewModel.reconnectLast()
         if (!attempted) {
@@ -165,7 +132,16 @@ private fun ControllerRoot(viewModel: RcViewModel) {
             }
         }
     }
-    FreshCarScreen(viewModel)
+
+    Box(Modifier.fillMaxSize()) {
+        FreshCarScreen(viewModel)
+        AppUpdateControl(
+            viewModel = viewModel,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 18.dp, top = 76.dp)
+        )
+    }
 }
 
 @Composable

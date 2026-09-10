@@ -29,6 +29,7 @@ enum class AppUpdateStage {
     IDLE,
     CHECKING,
     UP_TO_DATE,
+    AVAILABLE,
     DOWNLOADING,
     READY,
     WAITING_PERMISSION,
@@ -42,7 +43,7 @@ data class AppUpdateState(
     val currentVersion: String = "",
     val latestVersion: String = "",
     val progress: Int = 0,
-    val message: String = "자동 업데이트 확인 대기",
+    val message: String = "앱 업데이트 확인 대기",
     val releaseUrl: String = ""
 )
 
@@ -62,6 +63,9 @@ object AppUpdater {
     @Volatile
     private var readyApk: File? = null
 
+    @Volatile
+    private var availableRelease: ReleaseInfo? = null
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
@@ -70,12 +74,7 @@ object AppUpdater {
         .followSslRedirects(true)
         .build()
 
-    /**
-     * Restore a previously downloaded and validated APK before doing any network work. This is the
-     * piece that makes the updater actually automatic across app restarts: if an update finished
-     * downloading while the car was connected, the next launch can open Android's installer before
-     * reconnecting the vehicle instead of downloading the same APK again.
-     */
+    /** Restore a previously downloaded and validated APK, but never launch its installer automatically. */
     fun restoreStagedUpdate(activity: Activity): Boolean {
         val prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
         val path = prefs.getString(KEY_STAGED_APK, null) ?: return false
@@ -107,6 +106,7 @@ object AppUpdater {
         }
 
         readyApk = canonicalApk
+        availableRelease = null
         val currentVersion = current.versionName.orEmpty().ifBlank { "0.0.0" }
         val latestVersion = archive.versionName.orEmpty().ifBlank { stagedVersion.ifBlank { "new" } }
         _state.value = AppUpdateState(
@@ -114,17 +114,13 @@ object AppUpdater {
             currentVersion = currentVersion,
             latestVersion = latestVersion,
             progress = 100,
-            message = "v$latestVersion 다운로드 완료 · 설치 대기"
+            message = "v$latestVersion 다운로드 및 검증 완료 · 설치 버튼을 누르세요"
         )
         return true
     }
 
-    /**
-     * Called automatically at app startup. Only published, non-prerelease Android releases that
-     * actually contain an APK are considered. This keeps unrelated/stale GitHub releases from
-     * being mistaken for an app update channel.
-     */
-    suspend fun checkForUpdate(activity: Activity, installWhenReady: Boolean = true) {
+    /** Check only release metadata. A newer APK is never downloaded until the user requests it. */
+    suspend fun checkForUpdate(activity: Activity) {
         if (!running.compareAndSet(false, true)) return
 
         val current = currentPackageInfo(activity)
@@ -132,12 +128,13 @@ object AppUpdater {
         _state.value = AppUpdateState(
             stage = AppUpdateStage.CHECKING,
             currentVersion = currentVersion,
-            message = "공식 앱 릴리즈 확인 중"
+            message = "최신 공식 앱 버전 확인 중"
         )
 
         try {
             val release = withContext(Dispatchers.IO) { resolveLatestRelease(currentVersion) }
             if (release == null) {
+                availableRelease = null
                 readyApk = null
                 clearStagedUpdate(activity, deleteFile = true)
                 _state.value = AppUpdateState(
@@ -145,17 +142,68 @@ object AppUpdater {
                     currentVersion = currentVersion,
                     latestVersion = currentVersion,
                     progress = 100,
-                    message = "최신 공식 버전 사용 중"
+                    message = "현재 앱이 최신 버전입니다"
                 )
                 return
             }
 
+            availableRelease = release
+            readyApk = null
+            _state.value = AppUpdateState(
+                stage = AppUpdateStage.AVAILABLE,
+                currentVersion = currentVersion,
+                latestVersion = release.version,
+                progress = 0,
+                message = "새 앱 v${release.version} 사용 가능 · 업데이트 버튼을 눌러 시작하세요",
+                releaseUrl = release.releaseUrl
+            )
+        } catch (t: Throwable) {
+            availableRelease = null
+            readyApk = null
+            _state.value = AppUpdateState(
+                stage = AppUpdateStage.ERROR,
+                currentVersion = currentVersion,
+                latestVersion = _state.value.latestVersion,
+                progress = 0,
+                message = t.message ?: "앱 업데이트 확인 실패",
+                releaseUrl = _state.value.releaseUrl
+            )
+        } finally {
+            running.set(false)
+        }
+    }
+
+    /** Download and validate the release selected by the metadata check. This is user initiated. */
+    suspend fun downloadAvailableUpdate(activity: Activity) {
+        if (!running.compareAndSet(false, true)) return
+
+        val current = currentPackageInfo(activity)
+        val currentVersion = current.versionName.orEmpty().ifBlank { "0.0.0" }
+        try {
+            val release = availableRelease ?: withContext(Dispatchers.IO) {
+                resolveLatestRelease(currentVersion)
+            }
+
+            if (release == null) {
+                availableRelease = null
+                readyApk = null
+                _state.value = AppUpdateState(
+                    stage = AppUpdateStage.UP_TO_DATE,
+                    currentVersion = currentVersion,
+                    latestVersion = currentVersion,
+                    progress = 100,
+                    message = "현재 앱이 최신 버전입니다"
+                )
+                return
+            }
+
+            availableRelease = release
             _state.value = AppUpdateState(
                 stage = AppUpdateStage.DOWNLOADING,
                 currentVersion = currentVersion,
                 latestVersion = release.version,
                 progress = 0,
-                message = "v${release.version} 자동 다운로드 중",
+                message = "v${release.version} 다운로드 중 · 0%",
                 releaseUrl = release.releaseUrl
             )
 
@@ -173,34 +221,28 @@ object AppUpdater {
                     currentVersion = currentVersion,
                     latestVersion = release.version,
                     progress = 100,
-                    message = "현재 설치본과 공식 릴리즈의 Android 서명이 다릅니다. 최초 persistent-signed 설치본으로 한 번 전환하면 이후부터 자동 덮어쓰기가 가능합니다.",
+                    message = "현재 설치본과 공식 릴리즈의 Android 서명이 다릅니다. 기존 앱 위에는 설치할 수 없습니다.",
                     releaseUrl = release.releaseUrl
                 )
                 return
             }
 
             persistStagedUpdate(activity, downloaded.apk, release.version)
+            availableRelease = null
             _state.value = AppUpdateState(
                 stage = AppUpdateStage.READY,
                 currentVersion = currentVersion,
                 latestVersion = release.version,
                 progress = 100,
-                message = "v${release.version} 검증 완료 · 안전한 시점에 자동 설치",
+                message = "v${release.version} 다운로드 및 검증 완료 · 설치 버튼을 누르세요",
                 releaseUrl = release.releaseUrl
             )
-
-            if (installWhenReady) {
-                withContext(Dispatchers.Main) { installReadyUpdate(activity) }
-            }
         } catch (t: Throwable) {
             readyApk = null
-            _state.value = AppUpdateState(
+            _state.value = _state.value.copy(
                 stage = AppUpdateStage.ERROR,
                 currentVersion = currentVersion,
-                latestVersion = _state.value.latestVersion,
-                progress = _state.value.progress,
-                message = t.message ?: "앱 업데이트 확인 실패",
-                releaseUrl = _state.value.releaseUrl
+                message = t.message ?: "앱 업데이트 다운로드 실패"
             )
         } finally {
             running.set(false)
@@ -212,7 +254,7 @@ object AppUpdater {
         if (apk == null || !apk.isFile || apk.length() <= 0) {
             _state.value = _state.value.copy(
                 stage = AppUpdateStage.ERROR,
-                message = "설치할 업데이트 APK가 없습니다. 다음 실행에서 다시 확인합니다."
+                message = "설치할 업데이트 APK가 없습니다. 다시 확인해 주세요."
             )
             return
         }
@@ -320,8 +362,8 @@ object AppUpdater {
 
         when (compareVersions(newest.version, currentVersion)) {
             -1 -> error(
-                "공식 자동업데이트 채널은 v${newest.version}까지 게시되어 있지만 현재 앱은 v$currentVersion 입니다. " +
-                    "현재 설치본이 릴리즈보다 앞선 개발 빌드입니다."
+                "최신 공개 앱은 v${newest.version}이고 현재 설치본은 v$currentVersion 입니다. " +
+                    "현재 설치본이 공개 릴리즈보다 앞선 개발 버전입니다."
             )
             0 -> return null
         }
@@ -428,7 +470,7 @@ object AppUpdater {
                 .apply()
             _state.value = _state.value.copy(
                 stage = AppUpdateStage.WAITING_PERMISSION,
-                message = "한 번만 '알 수 없는 앱 설치' 권한을 허용하면 이후 업데이트는 같은 흐름으로 진행됩니다."
+                message = "'알 수 없는 앱 설치' 권한을 허용하면 요청한 업데이트 설치를 계속합니다."
             )
             activity.startActivity(
                 Intent(
