@@ -387,7 +387,8 @@ jobs:
           - Signing identity is isolated in the fixed android-signing-v2 tag cache scope, not the default-branch cache
           - Primary and backup signing caches must agree; missing caches after any persistent-signed Android release cause a hard failure instead of silent key rotation
           - Every new APK signer is compared with the previously published persistent Android signer before release
-          - Automatic release check, verified download, persistent staging, and Bluetooth-safe deferred installation remain enabled
+          - Automatic release metadata checks remain enabled; APK download and installation are user-initiated
+          - User-requested APK downloads remain verified and persistently staged until the user presses install
           - Android package/version/SHA-256/signing-certificate validation remains enforced before installation
           - First transition from an older CI/debug signer can still require one uninstall/reinstall
 
