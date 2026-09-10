@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SIGNING_ANCHOR_TAG: android-signing-v1
+  SIGNING_ANCHOR_TAG: android-signing-v2
   TRUSTED_WORKFLOW: android-release-trusted.yml
 
 jobs:
