@@ -78,7 +78,10 @@ jobs:
               Remove-Item 'release-signing.jks' -Force
               Copy-Item '.github-release-signing.env' 'recovery.env.backup'
               Remove-Item '.github-release-signing.env' -Force
-              [System.IO.File]::WriteAllBytes('release-signing.jks', [byte[]](0x05, 0x06, 0x07, 0x08))
+              [System.IO.File]::WriteAllBytes(
+                  (Join-Path $work 'release-signing.jks'),
+                  [byte[]](0x05, 0x06, 0x07, 0x08)
+              )
               $orphanBlocked = $false
               try {
                   & $script -NoGitHubUpload -NoReleaseTrigger
