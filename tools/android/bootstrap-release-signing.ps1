@@ -10,7 +10,12 @@ $ErrorActionPreference = "Stop"
 
 function New-RandomSecret {
     $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
     return [Convert]::ToBase64String($bytes)
 }
 
@@ -23,8 +28,8 @@ function Set-GitHubSecretExact {
     )
 
     # Do not use PowerShell's normal pipeline here: it can append a newline to stdin, which is
-    # harmless for base64 but can corrupt Android keystore/key passwords. Write the exact bytes to
-    # gh's redirected stdin instead.
+    # harmless for base64 but can corrupt Android keystore/key passwords. Write the exact value to
+    # gh's redirected stdin. This works on both Windows PowerShell 5.1 and PowerShell 7+.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $GhPath
     $psi.Arguments = "secret set `"$Name`" --repo `"$RepositoryName`""
