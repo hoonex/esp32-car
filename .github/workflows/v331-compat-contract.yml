@@ -1,0 +1,51 @@
+name: Verify v3.3.1 Migration Contract
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'chore/**', 'hardening/**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  v331-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify v3.3.1 camera and OTA migration invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          UI='app/src/main/java/io/github/hoonex/esp32car/ui/screens/FreshCarScreen.kt'
+          VM='app/src/main/java/io/github/hoonex/esp32car/viewmodel/RcViewModel.kt'
+          FW='firmware/ESP32_CAM_RC_Controller.ino'
+
+          # v3.3.1 protects :81/stream with the same per-device control key used by /api/info.
+          grep -F 'connection.setRequestProperty("X-ESP32-Control-Key", controlKey)' "$UI"
+
+          # VISION must be proven by a decoded MJPEG frame, never by a cached IP alone.
+          grep -F 'wifiOnline = cameraStreaming' "$UI"
+          grep -F 'onStreamingChanged(true)' "$UI"
+
+          # Any known 3.x source, including 3.3.1, uses dual Wi-Fi + Bluetooth boot verification.
+          grep -F 'val v3ToV4Migration = sourceVersion.trim().startsWith("3.")' "$VM"
+          grep -F 'migrationExpectedVersion = bundle.version' "$VM"
+          grep -F 'bluetooth.connectToDevice(remembered)' "$VM"
+          grep -F 'updateStage == FirmwareUpdateUiState.Stage.REBOOTING || updateStage == FirmwareUpdateUiState.Stage.ERROR' "$VM"
+
+          # Firmware update button requires a live authenticated HTTP status, not a stale address.
+          grep -F 'val otaHttpReady = ip.isNotBlank() && controlKey.isNotBlank() && httpConfirmed && otaAdvertised && httpAdvertised' "$UI"
+
+          # Keep the v4 firmware OTA-capable and NVS-compatible with the known repo-built v3.3.1 line.
+          grep -F 'preferences.begin("wifi_creds"' "$FW"
+          grep -F '.uri = "/api/ota"' "$FW"
+          grep -F 'Update.begin(req->content_len, U_FLASH)' "$FW"
+          grep -F 'app0,     app,  ota_0,   0x10000, 1900K,' firmware/partitions.csv
+          grep -F 'app1,     app,  ota_1,   ,        1900K,' firmware/partitions.csv
+
+          echo 'v3.3.1 -> v4 migration contract OK'

@@ -34,6 +34,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -57,6 +58,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -133,7 +135,7 @@ private fun FreshConnectScreen(viewModel: RcViewModel) {
                 Text("RC controller", color = Mint, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(22.dp))
                 Text(
-                    "Bluetooth로 주행하고 Wi‑Fi로 카메라와 펌웨어 업데이트를 사용합니다.",
+                    "Bluetooth로 주행하고 Wi-Fi로 카메라와 펌웨어 업데이트를 사용합니다.",
                     color = TextMuted,
                     fontSize = 11.sp,
                     lineHeight = 17.sp
@@ -215,7 +217,10 @@ private fun DeviceRow(device: BluetoothDevice, busy: Boolean, onConnect: () -> U
             Button(
                 enabled = !busy,
                 onClick = onConnect,
-                colors = ButtonDefaults.buttonColors(containerColor = if (target) Blue else Color(0xFF24303A), contentColor = if (target) Color(0xFF071016) else TextMain)
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (target) Blue else Color(0xFF24303A),
+                    contentColor = if (target) Color(0xFF071016) else TextMain
+                )
             ) {
                 Text(if (busy) "..." else "CONNECT", fontSize = 9.sp, fontWeight = FontWeight.Bold)
             }
@@ -237,24 +242,38 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
     var steering by remember { mutableFloatStateOf(0f) }
     var tankLeft by remember { mutableFloatStateOf(0f) }
     var tankRight by remember { mutableFloatStateOf(0f) }
+    var cameraStreaming by remember { mutableStateOf(false) }
     var wifiDialog by remember { mutableStateOf(false) }
     var updateDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    val status = wifiStatus ?: btStatus
-    val ip = status?.optString("ip")?.takeIf { it.isNotBlank() && it != "0.0.0.0" } ?: viewModel.settings.ipAddress
-    val fw = btStatus?.optString("fw")?.takeIf { it.isNotBlank() } ?: viewModel.settings.lastFirmwareVersion.ifBlank { "—" }
-    // v3.2.0 never reported a `camera` boolean even when its MJPEG server was healthy.
-    // The actual stream is authoritative, so any valid IP is enough to start/recover vision.
-    val visionConfigured = ip.isNotBlank()
+    val reportedIp = wifiStatus?.optString("ip")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
+    val btIp = btStatus?.optString("ip")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && it != "0.0.0.0" }
+    val ip = reportedIp ?: btIp ?: viewModel.settings.ipAddress.trim()
+    val fw = btStatus?.optString("fw")?.takeIf { it.isNotBlank() }
+        ?: wifiStatus?.optString("fw")?.takeIf { it.isNotBlank() }
+        ?: viewModel.settings.lastFirmwareVersion.ifBlank { "—" }
+    val controlKey = viewModel.settings.otaKey.trim()
+
+    // Never advertise VISION ON from a cached IP. The status endpoint proves HTTP reachability,
+    // while the first decoded MJPEG frame proves the camera path itself is genuinely usable.
+    val httpConfirmed = wifiStatus != null && wifiError.isNullOrBlank()
+    val otaAdvertised = wifiStatus?.optBoolean("ota", true) ?: false
+    val httpAdvertised = wifiStatus?.optBoolean("http_ready", true) ?: false
+    val otaHttpReady = ip.isNotBlank() && controlKey.isNotBlank() && httpConfirmed && otaAdvertised && httpAdvertised
+    val cameraAttemptReady = ip.isNotBlank() && controlKey.isNotBlank()
 
     LaunchedEffect(Unit) {
         viewModel.updateSpeed(255f)
         viewModel.refreshBluetoothStatus()
     }
 
-    LaunchedEffect(ip) {
-        if (ip.isNotBlank()) viewModel.refreshWifiStatus()
+    LaunchedEffect(ip, controlKey) {
+        if (ip.isNotBlank() && controlKey.isNotBlank()) viewModel.refreshWifiStatus()
     }
 
     LaunchedEffect(mode, speed) {
@@ -289,12 +308,15 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
     BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
         val compact = maxWidth < 720.dp
         val headerHeight = if (compact) 58.dp else 66.dp
-        val controlW = if (compact) 132.dp else 156.dp
-        val controlH = if (compact) 160.dp else 184.dp
+        val touchW = if (compact) 150.dp else 174.dp
+        val touchH = if (compact) 172.dp else 196.dp
+        val horizontalTouchW = if (compact) 176.dp else 204.dp
 
         CameraCanvas(
             ip = ip,
-            enabled = visionConfigured,
+            controlKey = controlKey,
+            enabled = cameraAttemptReady,
+            onStreamingChanged = { cameraStreaming = it },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = headerHeight)
@@ -302,7 +324,7 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
 
         TopBar(
             fw = fw,
-            wifiOnline = visionConfigured && wifiError.isNullOrBlank(),
+            wifiOnline = cameraStreaming,
             lightOn = light > 0f,
             onLight = { viewModel.updateLight(if (light > 0f) 0f else 255f) },
             onWifi = { wifiDialog = true },
@@ -317,17 +339,29 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
             modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().height(headerHeight)
         )
 
-        if (!visionConfigured) {
+        if (!cameraStreaming) {
             Surface(
-                modifier = Modifier.align(Alignment.Center).padding(top = headerHeight),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = headerHeight + 14.dp),
                 color = Panel,
                 shape = RoundedCornerShape(999.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Line)
             ) {
-                Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(7.dp).background(Amber, CircleShape))
+                Row(
+                    Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.size(7.dp).background(if (httpConfirmed) Amber else Red, CircleShape))
                     Spacer(Modifier.width(8.dp))
-                    Text("Wi‑Fi vision not connected · Bluetooth control active", color = TextMuted, fontSize = 8.sp)
+                    Text(
+                        when {
+                            ip.isBlank() -> "Wi-Fi vision not connected · Bluetooth control active"
+                            controlKey.isBlank() -> "Waiting for Bluetooth security key"
+                            httpConfirmed -> "Wi-Fi online · camera reconnecting"
+                            else -> "Checking ESP32 Wi-Fi · Bluetooth control active"
+                        },
+                        color = TextMuted,
+                        fontSize = 8.sp
+                    )
                 }
             }
         }
@@ -338,13 +372,21 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
                     label = "THROTTLE",
                     value = throttle,
                     onValue = { throttle = it },
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 18.dp).width(controlW).height(controlH)
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 6.dp, bottom = 4.dp)
+                        .width(touchW)
+                        .height(touchH)
                 )
                 HorizontalControl(
                     label = "STEER",
                     value = steering,
                     onValue = { steering = it },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 18.dp).width(controlW + 22.dp).height(controlH)
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 6.dp, bottom = 4.dp)
+                        .width(horizontalTouchW)
+                        .height(touchH)
                 )
             }
             FreshDriveMode.TANK -> {
@@ -352,13 +394,21 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
                     label = "LEFT",
                     value = tankLeft,
                     onValue = { tankLeft = it },
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 18.dp).width(controlW).height(controlH)
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 6.dp, bottom = 4.dp)
+                        .width(touchW)
+                        .height(touchH)
                 )
                 VerticalControl(
                     label = "RIGHT",
                     value = tankRight,
                     onValue = { tankRight = it },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 18.dp).width(controlW).height(controlH)
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 6.dp, bottom = 4.dp)
+                        .width(touchW)
+                        .height(touchH)
                 )
             }
             FreshDriveMode.PAD -> {
@@ -366,13 +416,21 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
                     label = "STEER",
                     value = steering,
                     onValue = { steering = it },
-                    modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 18.dp).width(controlW + 22.dp).height(controlH)
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 6.dp, bottom = 4.dp)
+                        .width(horizontalTouchW)
+                        .height(touchH)
                 )
                 VerticalControl(
                     label = "THROTTLE",
                     value = throttle,
                     onValue = { throttle = it },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 18.dp).width(controlW).height(controlH)
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 6.dp, bottom = 4.dp)
+                        .width(touchW)
+                        .height(touchH)
                 )
             }
         }
@@ -389,21 +447,26 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
                 mode = it
             },
             onSpeed = viewModel::updateSpeed,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
         )
     }
 
     if (wifiDialog) {
         WifiDialog(
-            currentSsid = status?.optString("ssid").orEmpty(),
+            currentSsid = wifiStatus?.optString("ssid").orEmpty().ifBlank { btStatus?.optString("ssid").orEmpty() },
+            currentStatus = when {
+                cameraStreaming -> "카메라 스트림 연결됨"
+                httpConfirmed -> "ESP32 Wi-Fi/HTTP 연결됨 · 카메라 재연결 중"
+                wifiError != null -> wifiError
+                ip.isNotBlank() -> "ESP32 IP $ip 확인 중"
+                else -> null
+            },
             onDismiss = { wifiDialog = false },
             onConnect = { ssid, pass ->
                 scope.launch {
                     viewModel.provisionWifi(ssid, pass)
-                    delay(350)
+                    delay(300)
                     viewModel.switchEsp32ToWifi()
-                    delay(1000)
-                    viewModel.refreshBluetoothStatus()
                 }
                 wifiDialog = false
             }
@@ -415,7 +478,14 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
             installed = fw,
             bundled = firmware.bundledVersion,
             state = firmware,
-            canUpdate = ip.isNotBlank() && viewModel.settings.otaKey.isNotBlank(),
+            canUpdate = otaHttpReady,
+            wifiDetail = when {
+                otaHttpReady -> "HTTP OTA 준비됨 · $ip"
+                ip.isBlank() -> "ESP32 Wi-Fi IP가 없습니다."
+                controlKey.isBlank() -> "Bluetooth STATUS에서 OTA 키를 받는 중입니다."
+                wifiError != null -> "HTTP 확인 실패: $wifiError"
+                else -> "ESP32 HTTP OTA 상태를 확인 중입니다."
+            },
             onDismiss = { updateDialog = false },
             onUpdate = { viewModel.updateFirmwareFromBundled() }
         )
@@ -433,18 +503,37 @@ private fun TopBar(
     onStop: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(modifier = modifier, color = Color(0xF50B0E12), border = androidx.compose.foundation.BorderStroke(0.5.dp, Line)) {
-        Row(Modifier.fillMaxSize().padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+    Surface(
+        modifier = modifier,
+        color = Color(0xF50B0E12),
+        border = androidx.compose.foundation.BorderStroke(0.5.dp, Line)
+    ) {
+        Row(
+            Modifier.fillMaxSize().padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Column(Modifier.weight(1f)) {
                 Text("ESP32 CAR", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.Black)
                 Text("Bluetooth control", color = Mint, fontSize = 7.sp, fontWeight = FontWeight.Bold)
             }
             StatusPill(Icons.Default.Bluetooth, "BT", "ON", Mint)
             Spacer(Modifier.width(7.dp))
-            StatusPill(Icons.Default.Wifi, "VISION", if (wifiOnline) "ON" else "OFF", if (wifiOnline) Blue else TextMuted)
+            StatusPill(
+                Icons.Default.Wifi,
+                "VISION",
+                if (wifiOnline) "ON" else "OFF",
+                if (wifiOnline) Blue else TextMuted
+            )
             Spacer(Modifier.width(7.dp))
-            Surface(color = Color(0xFF151A20), shape = RoundedCornerShape(12.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-                Column(Modifier.padding(horizontal = 11.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Surface(
+                color = Color(0xFF151A20),
+                shape = RoundedCornerShape(12.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Line)
+            ) {
+                Column(
+                    Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
                     Text("FW", color = TextMuted, fontSize = 5.sp)
                     Text(fw, color = TextMain, fontSize = 8.sp, fontWeight = FontWeight.Bold)
                 }
@@ -454,7 +543,10 @@ private fun TopBar(
             HeaderAction(Icons.Default.Wifi, Blue, onWifi)
             HeaderAction(Icons.Default.Download, TextMain, onUpdate)
             Surface(onClick = onStop, color = Red, shape = RoundedCornerShape(13.dp)) {
-                Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(Icons.Default.Stop, null, Modifier.size(15.dp), tint = Color.White)
                     Spacer(Modifier.width(5.dp))
                     Text("STOP", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Black)
@@ -465,9 +557,21 @@ private fun TopBar(
 }
 
 @Composable
-private fun StatusPill(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, value: String, tint: Color) {
-    Surface(color = Color(0xFF151A20), shape = RoundedCornerShape(12.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun StatusPill(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    value: String,
+    tint: Color
+) {
+    Surface(
+        color = Color(0xFF151A20),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Line)
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Icon(icon, null, Modifier.size(14.dp), tint = tint)
             Spacer(Modifier.width(6.dp))
             Column {
@@ -479,8 +583,17 @@ private fun StatusPill(icon: androidx.compose.ui.graphics.vector.ImageVector, ti
 }
 
 @Composable
-private fun HeaderAction(icon: androidx.compose.ui.graphics.vector.ImageVector, tint: Color, onClick: () -> Unit) {
-    Surface(onClick = onClick, color = Color(0xFF151A20), shape = RoundedCornerShape(13.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
+private fun HeaderAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        color = Color(0xFF151A20),
+        shape = RoundedCornerShape(13.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Line)
+    ) {
         Icon(icon, null, Modifier.padding(9.dp).size(16.dp), tint = tint)
     }
     Spacer(Modifier.width(6.dp))
@@ -494,125 +607,240 @@ private fun BottomDock(
     onSpeed: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(modifier = modifier, color = Panel, shape = RoundedCornerShape(18.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+    Surface(
+        modifier = modifier,
+        color = Panel,
+        shape = RoundedCornerShape(18.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Line)
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
             FreshDriveMode.entries.forEach { item ->
                 Surface(
                     onClick = { onMode(item) },
                     color = if (item == mode) Blue.copy(alpha = 0.17f) else Color.Transparent,
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text(item.label, modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp), color = if (item == mode) Blue else TextMuted, fontSize = 7.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        item.label,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        color = if (item == mode) Blue else TextMuted,
+                        fontSize = 7.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
             Spacer(Modifier.width(5.dp))
-            Text("${((speed / 255f) * 100).roundToInt()}%", color = TextMain, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-            Slider(value = speed.coerceIn(50f, 255f), onValueChange = onSpeed, valueRange = 50f..255f, modifier = Modifier.width(118.dp))
+            Text(
+                "${((speed / 255f) * 100).roundToInt()}%",
+                color = TextMain,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Slider(
+                value = speed.coerceIn(50f, 255f),
+                onValueChange = onSpeed,
+                valueRange = 50f..255f,
+                modifier = Modifier.width(118.dp)
+            )
         }
     }
 }
 
 @Composable
-private fun VerticalControl(label: String, value: Float, onValue: (Float) -> Unit, modifier: Modifier = Modifier) {
-    Surface(modifier = modifier, color = Panel, shape = RoundedCornerShape(28.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-        Box(
-            Modifier.fillMaxSize().pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { offset -> onValue((1f - (offset.y / size.height) * 2f).coerceIn(-1f, 1f)) },
-                    onDragEnd = { onValue(0f) },
-                    onDragCancel = { onValue(0f) }
-                ) { change, _ ->
-                    change.consume()
-                    onValue((1f - (change.position.y / size.height) * 2f).coerceIn(-1f, 1f))
+private fun VerticalControl(
+    label: String,
+    value: Float,
+    onValue: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    // The outer transparent box is the hit target. The visible Surface is deliberately inset so
+    // the controller occupies less of the camera view while touch acquisition gets easier.
+    Box(
+        modifier.pointerInput(Unit) {
+            detectDragGestures(
+                onDragStart = { offset ->
+                    onValue((1f - (offset.y / size.height) * 2f).coerceIn(-1f, 1f))
+                },
+                onDragEnd = { onValue(0f) },
+                onDragCancel = { onValue(0f) }
+            ) { change, _ ->
+                change.consume()
+                onValue((1f - (change.position.y / size.height) * 2f).coerceIn(-1f, 1f))
+            }
+        }
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 20.dp),
+            color = Panel,
+            shape = RoundedCornerShape(24.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Line)
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                Text(
+                    label,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
+                    color = TextMuted,
+                    fontSize = 6.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+                Canvas(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 27.dp)) {
+                    val cx = size.width / 2f
+                    val outerRadius = 14.dp.toPx()
+                    val coreRadius = 4.dp.toPx()
+                    drawLine(Line, Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2f, cap = StrokeCap.Round)
+                    drawLine(
+                        Line.copy(alpha = 0.5f),
+                        Offset(cx - 18.dp.toPx(), size.height / 2f),
+                        Offset(cx + 18.dp.toPx(), size.height / 2f),
+                        strokeWidth = 1f
+                    )
+                    val y = ((1f - value) / 2f) * size.height
+                    drawCircle(Mint.copy(alpha = 0.20f), outerRadius, Offset(cx, y))
+                    drawCircle(Mint, coreRadius, Offset(cx, y))
                 }
             }
-        ) {
-            Text(label, modifier = Modifier.align(Alignment.TopCenter).padding(top = 13.dp), color = TextMuted, fontSize = 6.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-            Canvas(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 34.dp)) {
-                val cx = size.width / 2f
-                drawLine(Line, Offset(cx, 0f), Offset(cx, size.height), strokeWidth = 2f, cap = StrokeCap.Round)
-                drawLine(Line.copy(alpha = 0.5f), Offset(cx - 22f, size.height / 2f), Offset(cx + 22f, size.height / 2f), strokeWidth = 1f)
-                val y = ((1f - value) / 2f) * size.height
-                drawCircle(Mint.copy(alpha = 0.18f), 27f, Offset(cx, y))
-                drawCircle(Mint, 5f, Offset(cx, y))
-            }
         }
     }
 }
 
 @Composable
-private fun HorizontalControl(label: String, value: Float, onValue: (Float) -> Unit, modifier: Modifier = Modifier) {
-    Surface(modifier = modifier, color = Panel, shape = RoundedCornerShape(28.dp), border = androidx.compose.foundation.BorderStroke(1.dp, Line)) {
-        Box(
-            Modifier.fillMaxSize().pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { offset -> onValue(((offset.x / size.width) * 2f - 1f).coerceIn(-1f, 1f)) },
-                    onDragEnd = { onValue(0f) },
-                    onDragCancel = { onValue(0f) }
-                ) { change, _ ->
-                    change.consume()
-                    onValue(((change.position.x / size.width) * 2f - 1f).coerceIn(-1f, 1f))
+private fun HorizontalControl(
+    label: String,
+    value: Float,
+    onValue: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier.pointerInput(Unit) {
+            detectDragGestures(
+                onDragStart = { offset ->
+                    onValue(((offset.x / size.width) * 2f - 1f).coerceIn(-1f, 1f))
+                },
+                onDragEnd = { onValue(0f) },
+                onDragCancel = { onValue(0f) }
+            ) { change, _ ->
+                change.consume()
+                onValue(((change.position.x / size.width) * 2f - 1f).coerceIn(-1f, 1f))
+            }
+        }
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 20.dp),
+            color = Panel,
+            shape = RoundedCornerShape(24.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Line)
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                Text(
+                    label,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
+                    color = TextMuted,
+                    fontSize = 6.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+                Canvas(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 30.dp)) {
+                    val cy = size.height / 2f
+                    val outerRadius = 14.dp.toPx()
+                    val coreRadius = 4.dp.toPx()
+                    drawLine(Line, Offset(0f, cy), Offset(size.width, cy), strokeWidth = 2f, cap = StrokeCap.Round)
+                    drawLine(
+                        Line.copy(alpha = 0.5f),
+                        Offset(size.width / 2f, cy - 18.dp.toPx()),
+                        Offset(size.width / 2f, cy + 18.dp.toPx()),
+                        strokeWidth = 1f
+                    )
+                    val x = ((value + 1f) / 2f) * size.width
+                    drawCircle(Blue.copy(alpha = 0.20f), outerRadius, Offset(x, cy))
+                    drawCircle(Blue, coreRadius, Offset(x, cy))
                 }
             }
-        ) {
-            Text(label, modifier = Modifier.align(Alignment.TopCenter).padding(top = 13.dp), color = TextMuted, fontSize = 6.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-            Canvas(Modifier.fillMaxSize().padding(horizontal = 25.dp, vertical = 40.dp)) {
-                val cy = size.height / 2f
-                drawLine(Line, Offset(0f, cy), Offset(size.width, cy), strokeWidth = 2f, cap = StrokeCap.Round)
-                drawLine(Line.copy(alpha = 0.5f), Offset(size.width / 2f, cy - 22f), Offset(size.width / 2f, cy + 22f), strokeWidth = 1f)
-                val x = ((value + 1f) / 2f) * size.width
-                drawCircle(Blue.copy(alpha = 0.18f), 27f, Offset(x, cy))
-                drawCircle(Blue, 5f, Offset(x, cy))
-            }
         }
     }
 }
 
 @Composable
-private fun CameraCanvas(ip: String, enabled: Boolean, modifier: Modifier = Modifier) {
+private fun CameraCanvas(
+    ip: String,
+    controlKey: String,
+    enabled: Boolean,
+    onStreamingChanged: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
     var frame by remember { mutableStateOf<Bitmap?>(null) }
     var failed by remember { mutableStateOf(false) }
     var retry by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(ip, enabled, retry) {
+    LaunchedEffect(ip, controlKey, enabled, retry) {
         frame = null
         failed = false
-        if (!enabled || ip.isBlank()) return@LaunchedEffect
+        onStreamingChanged(false)
+        if (!enabled || ip.isBlank() || controlKey.isBlank()) return@LaunchedEffect
 
-        withContext(Dispatchers.IO) {
-            val host = ip.removePrefix("http://").removePrefix("https://").substringBefore('/').substringBefore(':')
-            while (isActive) {
-                var connection: HttpURLConnection? = null
-                try {
-                    connection = URL("http://$host:81/stream").openConnection() as HttpURLConnection
-                    connection.connectTimeout = 2500
-                    connection.readTimeout = 6000
-                    connection.useCaches = false
-                    connection.connect()
-                    if (connection.responseCode !in 200..299) {
-                        throw IOException("Camera HTTP ${connection.responseCode}")
-                    }
-                    failed = false
-                    BufferedInputStream(connection.inputStream, 64 * 1024).use { input ->
-                        while (isActive) {
-                            val next = MjpegParser.readFrame(input) ?: throw IOException("Camera stream ended")
-                            frame = next
+        try {
+            withContext(Dispatchers.IO) {
+                val host = ip.removePrefix("http://")
+                    .removePrefix("https://")
+                    .substringBefore('/')
+                    .substringBefore(':')
+                var announcedStreaming = false
+                while (isActive) {
+                    var connection: HttpURLConnection? = null
+                    try {
+                        connection = URL("http://$host:81/stream").openConnection() as HttpURLConnection
+                        connection.connectTimeout = 2_500
+                        connection.readTimeout = 6_000
+                        connection.useCaches = false
+                        // Firmware 3.3.1 protects its MJPEG endpoint with this per-device key.
+                        // v4 ignores the extra header, so one request path is compatible with both.
+                        connection.setRequestProperty("X-ESP32-Control-Key", controlKey)
+                        connection.connect()
+                        if (connection.responseCode !in 200..299) {
+                            throw IOException("Camera HTTP ${connection.responseCode}")
                         }
+                        failed = false
+                        BufferedInputStream(connection.inputStream, 64 * 1024).use { input ->
+                            while (isActive) {
+                                val next = MjpegParser.readFrame(input)
+                                    ?: throw IOException("Camera stream ended")
+                                frame = next
+                                if (!announcedStreaming) {
+                                    announcedStreaming = true
+                                    onStreamingChanged(true)
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {
+                        if (!isActive) break
+                        if (announcedStreaming) {
+                            announcedStreaming = false
+                            onStreamingChanged(false)
+                        }
+                        failed = true
+                        delay(1_200)
+                    } finally {
+                        connection?.disconnect()
                     }
-                } catch (_: Throwable) {
-                    if (!isActive) break
-                    failed = true
-                    delay(1200)
-                } finally {
-                    connection?.disconnect()
                 }
             }
+        } finally {
+            onStreamingChanged(false)
         }
     }
 
     Box(modifier.background(Color.Black)) {
         frame?.let {
-            Image(it.asImageBitmap(), "ESP32 camera", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            Image(
+                it.asImageBitmap(),
+                "ESP32 camera",
+                Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
         }
         if (failed) {
             Surface(
@@ -622,7 +850,10 @@ private fun CameraCanvas(ip: String, enabled: Boolean, modifier: Modifier = Modi
                 shape = RoundedCornerShape(999.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Line)
             ) {
-                Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(Icons.Default.Refresh, null, Modifier.size(13.dp), tint = Amber)
                     Spacer(Modifier.width(6.dp))
                     Text("Camera reconnecting automatically", color = TextMuted, fontSize = 7.sp)
@@ -633,22 +864,73 @@ private fun CameraCanvas(ip: String, enabled: Boolean, modifier: Modifier = Modi
 }
 
 @Composable
-private fun WifiDialog(currentSsid: String, onDismiss: () -> Unit, onConnect: (String, String) -> Unit) {
+private fun WifiDialog(
+    currentSsid: String,
+    currentStatus: String?,
+    onDismiss: () -> Unit,
+    onConnect: (String, String) -> Unit
+) {
     var ssid by remember { mutableStateOf(currentSsid) }
     var password by remember { mutableStateOf("") }
+    var validationError by remember { mutableStateOf<String?>(null) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = PanelSolid,
-        title = { Text("Wi‑Fi vision", color = TextMain, fontWeight = FontWeight.Bold) },
+        title = { Text("Wi-Fi vision", color = TextMain, fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("폰과 ESP32가 같은 2.4GHz Wi‑Fi에 연결되면 카메라와 OTA를 사용할 수 있습니다.", color = TextMuted, fontSize = 10.sp)
-                OutlinedTextField(value = ssid, onValueChange = { ssid = it }, label = { Text("SSID") }, singleLine = true)
-                OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Password") }, singleLine = true)
+                Text(
+                    "폰과 ESP32가 같은 2.4GHz Wi-Fi에 연결되면 카메라와 OTA를 사용할 수 있습니다.",
+                    color = TextMuted,
+                    fontSize = 10.sp
+                )
+                currentStatus?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, color = if (it.contains("실패")) Red else Blue, fontSize = 8.sp)
+                }
+                OutlinedTextField(
+                    value = ssid,
+                    onValueChange = {
+                        ssid = it
+                        validationError = null
+                    },
+                    label = { Text("SSID") },
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        validationError = null
+                    },
+                    label = { Text("Password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
+                validationError?.let { Text(it, color = Red, fontSize = 8.sp) }
+                Text(
+                    "저장 후 ESP32가 연결을 시도하는 동안 Bluetooth 제어는 유지됩니다.",
+                    color = TextMuted,
+                    fontSize = 8.sp
+                )
             }
         },
         confirmButton = {
-            Button(enabled = ssid.isNotBlank(), onClick = { onConnect(ssid, password) }) { Text("저장하고 연결") }
+            Button(
+                enabled = ssid.isNotBlank(),
+                onClick = {
+                    val cleanSsid = ssid.trim()
+                    when {
+                        cleanSsid.isBlank() -> validationError = "SSID를 입력하세요."
+                        cleanSsid.contains(',') -> validationError = "현재 ESP32 프로토콜에서는 SSID에 쉼표를 사용할 수 없습니다."
+                        cleanSsid.contains('\n') || cleanSsid.contains('\r') -> validationError = "SSID에 줄바꿈을 사용할 수 없습니다."
+                        password.contains('\n') || password.contains('\r') -> validationError = "비밀번호에 줄바꿈을 사용할 수 없습니다."
+                        else -> onConnect(cleanSsid, password)
+                    }
+                }
+            ) {
+                Text("저장하고 연결")
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } }
     )
@@ -660,10 +942,15 @@ private fun FirmwareDialog(
     bundled: String,
     state: FirmwareUpdateUiState,
     canUpdate: Boolean,
+    wifiDetail: String,
     onDismiss: () -> Unit,
     onUpdate: () -> Unit
 ) {
-    val busy = state.stage == FirmwareUpdateUiState.Stage.PREPARING || state.stage == FirmwareUpdateUiState.Stage.UPLOADING || state.stage == FirmwareUpdateUiState.Stage.REBOOTING
+    val busy = state.stage == FirmwareUpdateUiState.Stage.PREPARING ||
+        state.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
+        state.stage == FirmwareUpdateUiState.Stage.REBOOTING
+    val migration = installed.startsWith("3.") && bundled.startsWith("4.")
+
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         containerColor = PanelSolid,
@@ -678,18 +965,32 @@ private fun FirmwareDialog(
                     Text("Bundled", color = TextMuted, fontSize = 9.sp, modifier = Modifier.weight(1f))
                     Text(bundled, color = Mint, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                 }
+                Text(wifiDetail, color = if (canUpdate) Blue else Amber, fontSize = 8.sp)
+                if (migration) {
+                    Text(
+                        "3.x → 4.x 전환: HTTP OTA 전송 후 Wi-Fi와 Bluetooth STATUS를 둘 다 확인해 실제 새 펌웨어 부팅까지 검증합니다.",
+                        color = Amber,
+                        fontSize = 8.sp
+                    )
+                }
                 if (state.stage != FirmwareUpdateUiState.Stage.IDLE) {
-                    Text(state.message, color = if (state.stage == FirmwareUpdateUiState.Stage.ERROR) Red else TextMuted, fontSize = 9.sp)
+                    Text(
+                        state.message,
+                        color = if (state.stage == FirmwareUpdateUiState.Stage.ERROR) Red else TextMuted,
+                        fontSize = 9.sp
+                    )
                     if (busy) {
-                        androidx.compose.material3.LinearProgressIndicator(progress = { state.progress.coerceIn(0, 100) / 100f }, modifier = Modifier.fillMaxWidth())
+                        LinearProgressIndicator(
+                            progress = { state.progress.coerceIn(0, 100) / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
-                if (!canUpdate) Text("먼저 Wi‑Fi vision 연결을 완료하세요.", color = Amber, fontSize = 8.sp)
             }
         },
         confirmButton = {
             Button(enabled = canUpdate && !busy, onClick = onUpdate) {
-                Text(if (busy) "진행 중" else "무선 업데이트")
+                Text(if (busy) "진행 중" else if (migration) "v4로 안전 업데이트" else "무선 업데이트")
             }
         },
         dismissButton = {
