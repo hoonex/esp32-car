@@ -31,7 +31,7 @@ function Read-SigningSecretFile {
         }
         $separator = $line.IndexOf('=')
         if ($separator -le 0) {
-            throw "잘못된 signing secret 파일 형식입니다: $Path"
+            throw "Invalid signing secret file format: $Path"
         }
         $name = $line.Substring(0, $separator)
         $value = $line.Substring($separator + 1)
@@ -45,7 +45,7 @@ function Read-SigningSecretFile {
         "ANDROID_KEY_PASSWORD"
     )) {
         if (-not $values.ContainsKey($required) -or [string]::IsNullOrWhiteSpace($values[$required])) {
-            throw "signing secret 파일에 필수 값이 없습니다: $required"
+            throw "Missing required signing secret value: $required"
         }
     }
 
@@ -74,7 +74,7 @@ function Set-GitHubSecretExact {
     $process.StartInfo = $psi
 
     if (-not $process.Start()) {
-        throw "GitHub CLI 시작 실패: $Name"
+        throw "Failed to start GitHub CLI while setting secret: $Name"
     }
     try {
         $process.StandardInput.Write($Value)
@@ -83,7 +83,7 @@ function Set-GitHubSecretExact {
         $stderr = $process.StandardError.ReadToEnd()
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) {
-            throw "GitHub secret 등록 실패: $Name`n$stderr"
+            throw "Failed to set GitHub secret: $Name`n$stderr"
         }
         if (-not [string]::IsNullOrWhiteSpace($stdout)) {
             Write-Host $stdout.Trim()
@@ -99,7 +99,7 @@ $hasKeystore = Test-Path $resolvedOutput
 $hasSecretFile = Test-Path $secretFile
 
 if ($hasKeystore -and -not $hasSecretFile) {
-    throw "signing keystore는 있지만 recovery secret 파일이 없습니다: $resolvedOutput`n비밀번호를 안전하게 복구할 수 없으므로 새 키를 만들거나 기존 키를 덮어쓰지 않습니다."
+    throw "A signing keystore exists without its recovery secret file: $resolvedOutput`nPasswords cannot be recovered safely, so the existing key will not be overwritten and a new key will not be generated."
 }
 
 if ($hasSecretFile) {
@@ -112,24 +112,24 @@ if ($hasSecretFile) {
     try {
         $expectedKeystoreBytes = [Convert]::FromBase64String($keystoreBase64)
     } catch {
-        throw "recovery secret 파일의 ANDROID_KEYSTORE_B64 값이 올바른 base64가 아닙니다."
+        throw "ANDROID_KEYSTORE_B64 in the recovery secret file is not valid base64."
     }
 
     if ($hasKeystore) {
         $actualKeystoreBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($resolvedOutput))
         if ($actualKeystoreBase64 -ne $keystoreBase64) {
-            throw "기존 JKS와 recovery secret 파일이 서로 일치하지 않습니다. 둘 중 하나를 덮어쓰지 않고 중단합니다."
+            throw "The existing JKS does not match the recovery secret file. Neither file will be overwritten."
         }
     } else {
         [System.IO.File]::WriteAllBytes($resolvedOutput, $expectedKeystoreBytes)
-        Write-Host "Recovery secret 파일에서 signing keystore를 복구했습니다: $resolvedOutput"
+        Write-Host "Recovered signing keystore from the recovery secret file: $resolvedOutput"
     }
 
-    Write-Host "기존 persistent signing 자료를 재사용합니다. 새 signing key를 생성하지 않습니다."
+    Write-Host "Reusing existing persistent signing material. No new signing key was generated."
 } else {
     $keytool = Get-Command keytool -ErrorAction SilentlyContinue
     if ($null -eq $keytool) {
-        throw "keytool을 찾지 못했습니다. JDK 17+를 설치하고 keytool이 PATH에 있는지 확인하세요."
+        throw "keytool was not found. Install JDK 17+ and ensure keytool is available on PATH."
     }
 
     $storePassword = New-RandomSecret
@@ -149,7 +149,7 @@ if ($hasSecretFile) {
         -dname "CN=ESP32 Car, OU=Personal, O=hoonex, L=Daegu, C=KR"
 
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $resolvedOutput)) {
-        throw "keytool이 release keystore를 만들지 못했습니다."
+        throw "keytool failed to create the release keystore."
     }
 
     $keystoreBytes = [System.IO.File]::ReadAllBytes($resolvedOutput)
@@ -164,34 +164,34 @@ ANDROID_KEY_ALIAS=$Alias
 ANDROID_KEY_PASSWORD=$keyPassword
 "@
     [System.IO.File]::WriteAllText($secretFile, $secretText, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "새 persistent signing 자료를 생성했습니다."
+    Write-Host "Created new persistent signing material."
 }
 
 $uploaded = $false
 if (-not $NoGitHubUpload) {
     $gh = Get-Command gh -ErrorAction SilentlyContinue
     if ($null -eq $gh) {
-        Write-Warning "GitHub CLI(gh)가 없어 secret 자동 등록을 건너뜁니다. gh를 설치한 뒤 이 스크립트를 다시 실행하면 기존 JKS/env를 그대로 재사용해 업로드합니다."
+        Write-Warning "GitHub CLI (gh) is not installed. Install gh and rerun this script; the existing JKS/env will be reused without rotating the signing key."
     } else {
         & $gh.Source auth status | Out-Host
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "GitHub CLI 로그인이 되어 있지 않습니다. 'gh auth login' 후 이 스크립트를 다시 실행하면 기존 signing 자료를 재사용해 업로드합니다."
+            Write-Warning "GitHub CLI is not authenticated. Run 'gh auth login' and rerun this script; the existing signing material will be reused."
         } else {
-            Write-Host "GitHub Actions signing secrets 등록 중..."
+            Write-Host "Uploading GitHub Actions signing secrets..."
             Set-GitHubSecretExact -Name "ANDROID_KEYSTORE_B64" -Value $keystoreBase64 -RepositoryName $Repository -GhPath $gh.Source
             Set-GitHubSecretExact -Name "ANDROID_KEYSTORE_PASSWORD" -Value $storePassword -RepositoryName $Repository -GhPath $gh.Source
             Set-GitHubSecretExact -Name "ANDROID_KEY_ALIAS" -Value $Alias -RepositoryName $Repository -GhPath $gh.Source
             Set-GitHubSecretExact -Name "ANDROID_KEY_PASSWORD" -Value $keyPassword -RepositoryName $Repository -GhPath $gh.Source
             $uploaded = $true
-            Write-Host "GitHub Actions signing secrets 등록 완료."
+            Write-Host "GitHub Actions signing secrets uploaded."
 
             if (-not $NoReleaseTrigger) {
-                Write-Host "main Android release workflow 시작 중..."
+                Write-Host "Starting the main Android release workflow..."
                 & $gh.Source workflow run android.yml --repo $Repository --ref main
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "secret은 등록됐지만 workflow_dispatch 시작은 실패했습니다. 다음 main push에서 자동으로 release가 만들어집니다."
+                    Write-Warning "Secrets were uploaded, but workflow_dispatch failed. The next push to main can create the release."
                 } else {
-                    Write-Host "Release workflow 요청 완료. Actions에서 persistent-signed APK/release가 생성됩니다."
+                    Write-Host "Release workflow dispatch requested. Actions can now build the persistent-signed APK and release."
                 }
             }
         }
@@ -205,5 +205,5 @@ Write-Host "Recovery secret file: $secretFile"
 Write-Host "Repository: $Repository"
 Write-Host "GitHub secrets uploaded: $uploaded"
 Write-Host ""
-Write-Warning "release-signing.jks와 .github-release-signing.env를 Git에 커밋하지 마세요. 둘 다 안전한 오프라인 위치에 백업하세요."
-Write-Warning "현재 설치된 CI debug APK와 새 persistent-signed APK는 signer가 다를 수 있습니다. 첫 전환에서만 한 번 재설치가 필요하며, 그 이후부터는 앱이 GitHub release를 받아 인플레이스 자동업데이트합니다."
+Write-Warning "Do not commit release-signing.jks or .github-release-signing.env. Back up both in a secure offline location."
+Write-Warning "The currently installed CI debug APK may use a different signer. The first transition may require one reinstall; later releases can update in place while the same signing key is retained."
