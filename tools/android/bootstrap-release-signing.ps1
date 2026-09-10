@@ -14,7 +14,7 @@ function New-RandomSecret {
     return [Convert]::ToBase64String($bytes)
 }
 
-function Set-GitHubSecretFromStdin {
+function Set-GitHubSecretExact {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Value,
@@ -22,9 +22,36 @@ function Set-GitHubSecretFromStdin {
         [Parameter(Mandatory = $true)][string]$GhPath
     )
 
-    $Value | & $GhPath secret set $Name --repo $RepositoryName
-    if ($LASTEXITCODE -ne 0) {
-        throw "GitHub secret 등록 실패: $Name"
+    # Do not use PowerShell's normal pipeline here: it can append a newline to stdin, which is
+    # harmless for base64 but can corrupt Android keystore/key passwords. Write the exact bytes to
+    # gh's redirected stdin instead.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $GhPath
+    $psi.Arguments = "secret set `"$Name`" --repo `"$RepositoryName`""
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+
+    if (-not $process.Start()) {
+        throw "GitHub CLI 시작 실패: $Name"
+    }
+    try {
+        $process.StandardInput.Write($Value)
+        $process.StandardInput.Close()
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "GitHub secret 등록 실패: $Name`n$stderr"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            Write-Host $stdout.Trim()
+        }
+    } finally {
+        $process.Dispose()
     }
 }
 
@@ -87,10 +114,10 @@ if (-not $NoGitHubUpload) {
             Write-Warning "GitHub CLI 로그인이 되어 있지 않습니다. 'gh auth login' 후 secret 등록을 다시 진행하세요."
         } else {
             Write-Host "GitHub Actions signing secrets 등록 중..."
-            Set-GitHubSecretFromStdin -Name "ANDROID_KEYSTORE_B64" -Value $keystoreBase64 -RepositoryName $Repository -GhPath $gh.Source
-            Set-GitHubSecretFromStdin -Name "ANDROID_KEYSTORE_PASSWORD" -Value $storePassword -RepositoryName $Repository -GhPath $gh.Source
-            Set-GitHubSecretFromStdin -Name "ANDROID_KEY_ALIAS" -Value $Alias -RepositoryName $Repository -GhPath $gh.Source
-            Set-GitHubSecretFromStdin -Name "ANDROID_KEY_PASSWORD" -Value $keyPassword -RepositoryName $Repository -GhPath $gh.Source
+            Set-GitHubSecretExact -Name "ANDROID_KEYSTORE_B64" -Value $keystoreBase64 -RepositoryName $Repository -GhPath $gh.Source
+            Set-GitHubSecretExact -Name "ANDROID_KEYSTORE_PASSWORD" -Value $storePassword -RepositoryName $Repository -GhPath $gh.Source
+            Set-GitHubSecretExact -Name "ANDROID_KEY_ALIAS" -Value $Alias -RepositoryName $Repository -GhPath $gh.Source
+            Set-GitHubSecretExact -Name "ANDROID_KEY_PASSWORD" -Value $keyPassword -RepositoryName $Repository -GhPath $gh.Source
             $uploaded = $true
             Write-Host "GitHub Actions signing secrets 등록 완료."
 
