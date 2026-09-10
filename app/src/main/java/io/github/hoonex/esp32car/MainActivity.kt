@@ -40,6 +40,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.protocol.RcProtocol
+import io.github.hoonex.esp32car.ui.components.AppUpdateControl
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
 import io.github.hoonex.esp32car.ui.theme.MyApplicationTheme
 import io.github.hoonex.esp32car.update.AppUpdater
@@ -131,7 +132,16 @@ private fun ControllerRoot(viewModel: RcViewModel) {
             }
         }
     }
-    FreshCarScreen(viewModel)
+
+    Box(Modifier.fillMaxSize()) {
+        FreshCarScreen(viewModel)
+        AppUpdateControl(
+            viewModel = viewModel,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 18.dp, top = 76.dp)
+        )
+    }
 }
 
 @Composable
