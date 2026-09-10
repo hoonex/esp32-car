@@ -621,7 +621,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             progress = 100,
             message = when {
                 observed.isNotBlank() && observed != expectedVersion ->
-                    "v$expectedVersion 전송 후 현재 Bluetooth에서 v$observed가 확인됩니다. 전원을 유지하고 다시 시도하세요."
+                    "v$expectedVersion 전송 후 현재 Bluetooth에서 v${observed}가 확인됩니다. 전원을 유지하고 다시 시도하세요."
                 v3ToV4Migration ->
                     "v$expectedVersion 전송은 끝났지만 Wi-Fi와 Bluetooth 모두에서 새 부팅을 확인하지 못했습니다. 재연결하면 늦게라도 자동으로 성공 판정합니다."
                 else ->
