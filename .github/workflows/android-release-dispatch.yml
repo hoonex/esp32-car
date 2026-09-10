@@ -31,7 +31,7 @@ env:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out current main
@@ -154,3 +154,101 @@ jobs:
             -f "source_sha=$SOURCE_SHA" \
             -f "validated_run_id=$VALIDATED_RUN_ID"
           echo "Dispatched $TRUSTED_WORKFLOW on tag $SIGNING_ANCHOR_TAG for $SOURCE_SHA."
+
+      - name: Reconcile published Android release notes
+        if: steps.source.outputs.proceed == 'true' && steps.source.outputs.mode == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -n 1)"
+          test -n "$VERSION"
+          TAG="android-v${VERSION}"
+          RELEASE_JSON="$RUNNER_TEMP/release.json"
+          FOUND=false
+
+          echo "Waiting for trusted signer to publish or preserve $TAG..."
+          for attempt in $(seq 1 30); do
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RELEASE_JSON" 2>/dev/null; then
+              FOUND=true
+              break
+            fi
+            echo "$TAG not visible yet (attempt $attempt/30)."
+            sleep 10
+          done
+
+          if [ "$FOUND" != "true" ]; then
+            echo "::error::Timed out waiting for $TAG."
+            exit 1
+          fi
+
+          APK_NAME="ESP32-Car-v${VERSION}.apk"
+          jq -e --arg apk "$APK_NAME" '
+            ([.assets[].name] | index($apk)) != null and
+            ([.assets[].name] | index("ANDROID_SIGNING_CERT_SHA256.txt")) != null and
+            ([.assets[].name] | index("SOURCE_COMMIT.txt")) != null and
+            ([.assets[].name] | index("firmware-manifest.json")) != null
+          ' "$RELEASE_JSON" >/dev/null
+
+          META_DIR="$RUNNER_TEMP/release-meta"
+          rm -rf "$META_DIR"
+          mkdir -p "$META_DIR"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'SOURCE_COMMIT.txt' \
+            --dir "$META_DIR"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'firmware-manifest.json' \
+            --dir "$META_DIR"
+
+          RELEASE_SOURCE="$(tr -d '\r\n ' < "$META_DIR/SOURCE_COMMIT.txt")"
+          test -n "$RELEASE_SOURCE"
+          TARGET_SHA="$(jq -r '.target_commitish // ""' "$RELEASE_JSON")"
+          if [ "$TARGET_SHA" != "$RELEASE_SOURCE" ]; then
+            echo "::error::$TAG target $TARGET_SHA does not match SOURCE_COMMIT.txt $RELEASE_SOURCE."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$RELEASE_SOURCE" "$SOURCE_SHA"; then
+            echo "::error::$TAG source $RELEASE_SOURCE is not an ancestor of current main $SOURCE_SHA."
+            exit 1
+          fi
+
+          RELEASE_VERSION="$(git show "$RELEASE_SOURCE:app/build.gradle.kts" | grep -oP 'versionName\s*=\s*"\K[^"]+' | head -n 1)"
+          if [ "$RELEASE_VERSION" != "$VERSION" ]; then
+            echo "::error::$TAG source declares v$RELEASE_VERSION, expected v$VERSION."
+            exit 1
+          fi
+
+          UPDATER_SOURCE="$RUNNER_TEMP/AppUpdater-release.kt"
+          git show "$RELEASE_SOURCE:app/src/main/java/io/github/hoonex/esp32car/update/AppUpdater.kt" > "$UPDATER_SOURCE"
+          grep -F 'A newer APK is never downloaded until the user requests it.' "$UPDATER_SOURCE"
+          grep -F 'Download and validate the release selected by the metadata check. This is user initiated.' "$UPDATER_SOURCE"
+          grep -F 'fun installReadyUpdate(activity: Activity)' "$UPDATER_SOURCE"
+
+          FW_VERSION="$(jq -r '.version // empty' "$META_DIR/firmware-manifest.json")"
+          test -n "$FW_VERSION"
+
+          cat > "$RUNNER_TEMP/RELEASE_NOTES.md" <<EOF
+          ESP32 Car Android v${VERSION}
+
+          - Zero-touch GitHub Actions release for the personal/internal in-app update channel
+          - Signing identity is isolated in the fixed android-signing-v2 tag cache scope, not the default-branch cache
+          - Primary and backup signing caches must agree; missing caches after any persistent-signed Android release cause a hard failure instead of silent key rotation
+          - Every new APK signer is compared with the previously published persistent Android signer before release
+          - Automatic release metadata checks remain enabled; APK download starts only after the user presses update
+          - Downloaded APKs are package/version/SHA-256/signing-certificate verified and persistently staged
+          - Installation starts only after an explicit user install action; if the car is connected, the requested install path stops control and disconnects Bluetooth before opening Android's installer
+          - First transition from an older CI/debug signer can still require one uninstall/reinstall
+
+          App source: ${RELEASE_SOURCE}
+          ESP32 firmware: ${FW_VERSION}
+          Hardware: AI Thinker ESP32-CAM, 4MB flash, 2WD L298N profile.
+          EOF
+
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes-file "$RUNNER_TEMP/RELEASE_NOTES.md"
+          echo "Reconciled $TAG release notes with the updater behavior in $RELEASE_SOURCE."
