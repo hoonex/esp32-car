@@ -69,6 +69,16 @@ jobs:
             exit 1
           fi
 
+          grep -F 'timeout-minutes: 20' "$DISPATCH"
+          grep -F 'Reconcile published Android release notes' "$DISPATCH"
+          grep -F "steps.source.outputs.mode == 'release'" "$DISPATCH"
+          grep -F 'index("SOURCE_COMMIT.txt")' "$DISPATCH"
+          grep -F 'index("firmware-manifest.json")' "$DISPATCH"
+          grep -F 'git merge-base --is-ancestor "$RELEASE_SOURCE" "$SOURCE_SHA"' "$DISPATCH"
+          grep -F 'A newer APK is never downloaded until the user requests it.' "$DISPATCH"
+          grep -F 'Download and validate the release selected by the metadata check. This is user initiated.' "$DISPATCH"
+          grep -F 'gh release edit "$TAG"' "$DISPATCH"
+
           grep -F 'SIGNING_ANCHOR_TAG: android-signing-v2' "$TRUSTED"
           grep -F 'refs/tags/$SIGNING_ANCHOR_TAG' "$TRUSTED"
           grep -F 'actions/cache/restore@v4' "$TRUSTED"
