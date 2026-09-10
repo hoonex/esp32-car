@@ -29,9 +29,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SIGNING_ANCHOR_TAG: android-signing-v1
-  PRIMARY_CACHE_KEY: esp32-car-android-signing-v1-primary-Linux
-  BACKUP_CACHE_KEY: esp32-car-android-signing-v1-backup-Linux
+  SIGNING_ANCHOR_TAG: android-signing-v2
+  PRIMARY_CACHE_KEY: esp32-car-android-signing-v2-primary-Linux
+  BACKUP_CACHE_KEY: esp32-car-android-signing-v2-backup-Linux
 
 jobs:
   sign-release:
@@ -108,7 +108,7 @@ jobs:
 
       - name: Install Android SDK packages
         shell: bash
-        run: yes | sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Restore primary signing identity
         id: primary-cache
@@ -148,7 +148,7 @@ jobs:
 
           PREVIOUS_TAG="$(
             gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '[.[] | select(.draft == false and (.tag_name | startswith("android-v")))][0].tag_name // ""'
+              --jq '[.[] | select(.draft == false and (.tag_name | startswith("android-v")) and (([.assets[].name] | index("ANDROID_SIGNING_CERT_SHA256.txt")) != null))][0].tag_name // ""'
           )"
 
           if [ "$PRIMARY_OK" = true ] && [ "$BACKUP_OK" = true ]; then
@@ -167,7 +167,7 @@ jobs:
             echo "Recovered missing primary from backup signing identity."
           else
             if [ -n "$PREVIOUS_TAG" ]; then
-              echo "::error::Both signing caches are missing but published Android release $PREVIOUS_TAG already exists. Refusing silent signer rotation."
+              echo "::error::Both signing caches are missing but persistent-signed Android release $PREVIOUS_TAG already exists. Refusing silent signer rotation."
               exit 1
             fi
             STORE_VALUE="$(openssl rand -base64 36 | tr -d '\r\n')"
@@ -223,34 +223,19 @@ jobs:
 
           if [ -n "$PREVIOUS_TAG" ]; then
             mkdir -p "$RUNNER_TEMP/previous-release"
-            if gh release download "$PREVIOUS_TAG" \
+            gh release download "$PREVIOUS_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern 'ANDROID_SIGNING_CERT_SHA256.txt' \
-              --dir "$RUNNER_TEMP/previous-release" >/dev/null 2>&1; then
-              EXPECTED="$(tr -d ':\r\n ' < "$RUNNER_TEMP/previous-release/ANDROID_SIGNING_CERT_SHA256.txt" | tr '[:lower:]' '[:upper:]')"
-            else
-              gh release download "$PREVIOUS_TAG" \
-                --repo "$GITHUB_REPOSITORY" \
-                --pattern '*.apk' \
-                --dir "$RUNNER_TEMP/previous-release"
-              PREVIOUS_APK="$(find "$RUNNER_TEMP/previous-release" -maxdepth 1 -type f -name '*.apk' | head -n 1)"
-              test -s "$PREVIOUS_APK"
-              EXPECTED="$(
-                "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$PREVIOUS_APK" \
-                  | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
-                  | head -n 1 \
-                  | tr -d ':\r\n ' \
-                  | tr '[:lower:]' '[:upper:]'
-              )"
-            fi
+              --dir "$RUNNER_TEMP/previous-release"
+            EXPECTED="$(tr -d ':\r\n ' < "$RUNNER_TEMP/previous-release/ANDROID_SIGNING_CERT_SHA256.txt" | tr '[:lower:]' '[:upper:]')"
             test -n "$EXPECTED"
             if [ "$SIGNER" != "$EXPECTED" ]; then
-              echo "::error::Cached signer does not match published Android lineage from $PREVIOUS_TAG."
+              echo "::error::Cached signer does not match published persistent Android lineage from $PREVIOUS_TAG."
               exit 1
             fi
             echo "Signing continuity matches $PREVIOUS_TAG: $SIGNER"
           else
-            echo "First Android release signer established: $SIGNER"
+            echo "First persistent Android release signer established: $SIGNER"
           fi
 
           echo "cert_sha256=$SIGNER" >> "$GITHUB_OUTPUT"
@@ -399,9 +384,9 @@ jobs:
           ESP32 Car Android v${APP_VERSION}
 
           - Zero-touch GitHub Actions release for the personal/internal in-app update channel
-          - Signing identity is isolated in the fixed android-signing-v1 tag cache scope, not the default-branch cache
-          - Primary and backup signing caches must agree; missing caches after any published Android release cause a hard failure instead of silent key rotation
-          - Every new APK signer is compared with the previously published Android signer before release
+          - Signing identity is isolated in the fixed android-signing-v2 tag cache scope, not the default-branch cache
+          - Primary and backup signing caches must agree; missing caches after any persistent-signed Android release cause a hard failure instead of silent key rotation
+          - Every new APK signer is compared with the previously published persistent Android signer before release
           - Automatic release check, verified download, persistent staging, and Bluetooth-safe deferred installation remain enabled
           - Android package/version/SHA-256/signing-certificate validation remains enforced before installation
           - First transition from an older CI/debug signer can still require one uninstall/reinstall
