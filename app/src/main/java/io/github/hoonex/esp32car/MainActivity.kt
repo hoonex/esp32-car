@@ -59,17 +59,15 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        // Update flow:
-        // 1) check GitHub official Android releases automatically,
-        // 2) download + validate the APK in-app,
-        // 3) install automatically as soon as the car is not actively connected.
-        //
-        // This deliberately does NOT pop Android's package installer in the middle of a drive.
-        // When the controller is connected the verified APK stays staged; disconnecting (or the
-        // next launch before reconnect) opens the system installer. Android still requires the
-        // normal package-install confirmation unless this phone is a managed/root device.
-        lifecycleScope.launch {
-            AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = false)
+        // A previously downloaded official APK is restored first. If no staged update exists,
+        // GitHub releases are checked and a newer APK is downloaded + validated in the background.
+        // Installation is only started while Bluetooth is disconnected so an app update can never
+        // tear down the controller in the middle of a drive.
+        val restoredStagedUpdate = AppUpdater.restoreStagedUpdate(this)
+        if (!restoredStagedUpdate) {
+            lifecycleScope.launch {
+                AppUpdater.checkForUpdate(this@MainActivity, installWhenReady = false)
+            }
         }
 
         lifecycleScope.launch {
@@ -120,10 +118,30 @@ class MainActivity : ComponentActivity() {
 @SuppressLint("MissingPermission")
 @Composable
 private fun ControllerRoot(viewModel: RcViewModel) {
-    // No setup screen for a car the phone already knows. Prefer the last verified board, then an
-    // already-paired ESP32_CAM_RC. If either automatic attempt fails, discovery starts by itself.
+    // Give a fast release check a short priority window before connecting the car. A completed
+    // update opens the installer before Bluetooth is touched; a slow/offline update check never
+    // blocks driving for more than a few seconds and can finish in the background instead.
     LaunchedEffect(Unit) {
-        delay(250)
+        delay(150)
+
+        var checkingWaitMs = 0L
+        while (AppUpdater.state.value.stage == AppUpdateStage.CHECKING && checkingWaitMs < 900L) {
+            delay(100)
+            checkingWaitMs += 100
+        }
+
+        var downloadWaitMs = 0L
+        while (AppUpdater.state.value.stage == AppUpdateStage.DOWNLOADING && downloadWaitMs < 5_000L) {
+            delay(100)
+            downloadWaitMs += 100
+        }
+
+        when (AppUpdater.state.value.stage) {
+            AppUpdateStage.READY,
+            AppUpdateStage.WAITING_PERMISSION,
+            AppUpdateStage.INSTALLING -> return@LaunchedEffect
+            else -> Unit
+        }
 
         var attempted = viewModel.reconnectLast()
         if (!attempted) {
