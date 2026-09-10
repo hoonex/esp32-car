@@ -1,0 +1,95 @@
+name: Verify Android Signing Bootstrap
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'chore/**', 'hardening/**']
+    paths:
+      - 'tools/android/bootstrap-release-signing.ps1'
+      - '.github/workflows/signing-bootstrap.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/android/bootstrap-release-signing.ps1'
+      - '.github/workflows/signing-bootstrap.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signing-bootstrap-contract:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify create, resume, recovery, and mismatch guards
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'tools/android/bootstrap-release-signing.ps1'
+          $work = Join-Path $env:RUNNER_TEMP 'esp32-car-signing-bootstrap-contract'
+          Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $work | Out-Null
+          Push-Location $work
+          try {
+              & $script -NoGitHubUpload -NoReleaseTrigger
+              if (-not (Test-Path 'release-signing.jks')) { throw 'first run did not create JKS' }
+              if (-not (Test-Path '.github-release-signing.env')) { throw 'first run did not create recovery env' }
+
+              $jksHash1 = (Get-FileHash 'release-signing.jks' -Algorithm SHA256).Hash
+              $envHash1 = (Get-FileHash '.github-release-signing.env' -Algorithm SHA256).Hash
+
+              & $script -NoGitHubUpload -NoReleaseTrigger
+              $jksHash2 = (Get-FileHash 'release-signing.jks' -Algorithm SHA256).Hash
+              $envHash2 = (Get-FileHash '.github-release-signing.env' -Algorithm SHA256).Hash
+              if ($jksHash2 -ne $jksHash1) { throw 'resume rotated or changed JKS' }
+              if ($envHash2 -ne $envHash1) { throw 'resume changed recovery env' }
+
+              Remove-Item 'release-signing.jks' -Force
+              & $script -NoGitHubUpload -NoReleaseTrigger
+              $jksHash3 = (Get-FileHash 'release-signing.jks' -Algorithm SHA256).Hash
+              if ($jksHash3 -ne $jksHash1) { throw 'JKS recovery did not reproduce original bytes' }
+
+              [System.IO.File]::WriteAllBytes(
+                  (Join-Path $work 'release-signing.jks'),
+                  [byte[]](0x01, 0x02, 0x03, 0x04)
+              )
+              $mismatchBlocked = $false
+              try {
+                  & $script -NoGitHubUpload -NoReleaseTrigger
+              } catch {
+                  $mismatchBlocked = $true
+                  Write-Host "Expected mismatch rejection: $($_.Exception.Message)"
+              }
+              if (-not $mismatchBlocked) { throw 'mismatched JKS/env pair was not rejected' }
+              if ((Get-FileHash '.github-release-signing.env' -Algorithm SHA256).Hash -ne $envHash1) {
+                  throw 'mismatch guard modified recovery env'
+              }
+
+              Remove-Item 'release-signing.jks' -Force
+              Copy-Item '.github-release-signing.env' 'recovery.env.backup'
+              Remove-Item '.github-release-signing.env' -Force
+              [System.IO.File]::WriteAllBytes('release-signing.jks', [byte[]](0x05, 0x06, 0x07, 0x08))
+              $orphanBlocked = $false
+              try {
+                  & $script -NoGitHubUpload -NoReleaseTrigger
+              } catch {
+                  $orphanBlocked = $true
+                  Write-Host "Expected orphaned JKS rejection: $($_.Exception.Message)"
+              }
+              if (-not $orphanBlocked) { throw 'orphaned JKS was not rejected' }
+              if ((Get-Item 'release-signing.jks').Length -ne 4) { throw 'orphan guard overwrote JKS' }
+
+              Write-Host 'Signing bootstrap contract verified.'
+          } finally {
+              Pop-Location
+          }
