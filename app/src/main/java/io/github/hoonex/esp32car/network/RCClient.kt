@@ -223,8 +223,6 @@ class RCClient {
                 while (offset < firmware.size) {
                     val count = minOf(chunk, firmware.size - offset)
                     sink.write(firmware, offset, count)
-                    // Keep UI progress close to bytes actually handed to the socket. This also makes
-                    // ESP32-side resets easier to classify than a large buffered write.
                     sink.flush()
                     offset += count
                     httpBytesSent.set(offset.toLong())
@@ -247,9 +245,6 @@ class RCClient {
 
                 val sent = httpBytesSent.get()
                 if (isPlausibleRebootDisconnect(e, sent, totalBytes)) {
-                    // The ESP32 HTTP server can disappear as the device commits/reboots. Do not call
-                    // this a successful flash here; hand it to the ViewModel as "verification required"
-                    // and require the reported firmware version after reboot to match.
                     callback(
                         Result.success(
                             JSONObject()
@@ -314,7 +309,18 @@ class RCClient {
                 response.use {
                     val text = it.body?.string().orEmpty()
                     if (!it.isSuccessful) {
-                        callback(Result.failure(IOException("OTA HTTP ${it.code}: $text")))
+                        if (shouldUseLanArduinoFallback(it.code, text)) {
+                            runLanArduinoFallback(
+                                ip = ip,
+                                firmware = firmware,
+                                otaKey = otaKey,
+                                onProgress = onProgress,
+                                reason = "HTTP OTA ${it.code}: $text",
+                                callback = callback
+                            )
+                        } else {
+                            callback(Result.failure(IOException("OTA HTTP ${it.code}: $text")))
+                        }
                         return
                     }
                     runCatching { JSONObject(text) }
@@ -339,6 +345,53 @@ class RCClient {
         statusClient.connectionPool.evictAll()
         otaClient.dispatcher.cancelAll()
         otaClient.connectionPool.evictAll()
+    }
+
+    private fun shouldUseLanArduinoFallback(code: Int, body: String): Boolean {
+        if (code !in 400..599) return false
+        val normalized = body.lowercase()
+        return normalized.contains("update_begin_failed") ||
+            normalized.contains("verification_failed") ||
+            normalized.contains("flash_write_failed")
+    }
+
+    private fun runLanArduinoFallback(
+        ip: String,
+        firmware: ByteArray,
+        otaKey: String,
+        onProgress: (sent: Long, total: Long) -> Unit,
+        reason: String,
+        callback: (Result<JSONObject>) -> Unit
+    ) {
+        Thread({
+            LanArduinoOtaClient.upload(
+                remoteHost = ip.substringBefore(':'),
+                firmware = firmware,
+                password = otaKey,
+                onProgress = onProgress
+            )
+                .onSuccess {
+                    callback(
+                        Result.success(
+                            JSONObject()
+                                .put("ok", true)
+                                .put("transport", "arduinoota-network-bound")
+                                .put("fallback_reason", reason)
+                                .put("rebooting", true)
+                        )
+                    )
+                }
+                .onFailure { fallbackError ->
+                    callback(
+                        Result.failure(
+                            IOException(
+                                "$reason; network-bound ArduinoOTA fallback failed: ${fallbackError.message}",
+                                fallbackError
+                            )
+                        )
+                    )
+                }
+        }, "esp32-network-bound-arduinoota").start()
     }
 
     private fun isPlausibleRebootDisconnect(error: IOException, sent: Long, total: Long): Boolean {
