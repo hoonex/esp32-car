@@ -16,21 +16,21 @@ class AppUpdateContractTest {
     fun availableStateCarriesCurrentAndLatestVersions() {
         val state = AppUpdateState(
             stage = AppUpdateStage.AVAILABLE,
-            currentVersion = "4.0.4",
-            latestVersion = "4.0.5",
+            currentVersion = "4.0.5",
+            latestVersion = "4.0.6",
             message = "update available"
         )
 
-        assertEquals("4.0.4", state.currentVersion)
-        assertEquals("4.0.5", state.latestVersion)
+        assertEquals("4.0.5", state.currentVersion)
+        assertEquals("4.0.6", state.latestVersion)
         assertEquals(AppUpdateStage.AVAILABLE, state.stage)
     }
 
     @Test
     fun versionComparatorRecognizesCurrentManualUpdateTarget() {
-        assertTrue(compareVersions("4.0.5", "4.0.4") > 0)
-        assertEquals(0, compareVersions("4.0.5", "4.0.5"))
-        assertTrue(compareVersions("4.0.4", "4.0.5") < 0)
+        assertTrue(compareVersions("4.0.6", "4.0.5") > 0)
+        assertEquals(0, compareVersions("4.0.6", "4.0.6"))
+        assertTrue(compareVersions("4.0.5", "4.0.6") < 0)
     }
 
     @Test
@@ -47,21 +47,21 @@ class AppUpdateContractTest {
 
     @Test
     fun versionComparatorIgnoresSuffixForNumericReleaseOrdering() {
-        assertEquals(0, compareVersions("4.0.5-preview", "4.0.5"))
-        assertTrue(compareVersions("4.0.6-preview", "4.0.5") > 0)
+        assertEquals(0, compareVersions("4.0.6-preview", "4.0.6"))
+        assertTrue(compareVersions("4.0.7-preview", "4.0.6") > 0)
     }
 
     @Test
     fun androidReleaseTagNormalizationKeepsExpectedVersion() {
-        assertEquals("4.0.5", normalizeReleaseVersion("android-v4.0.5"))
+        assertEquals("4.0.6", normalizeReleaseVersion("android-v4.0.6"))
     }
 
     @Test
     fun releaseApkSelectionRequiresExactVersionedAssetName() {
-        assertTrue(isExpectedReleaseApkName("ESP32-Car-v4.0.5.apk", "4.0.5"))
-        assertTrue(isExpectedReleaseApkName("esp32-car-v4.0.5.APK", "4.0.5"))
-        assertFalse(isExpectedReleaseApkName("ESP32-Car-v4.0.4.apk", "4.0.5"))
-        assertFalse(isExpectedReleaseApkName("another-app.apk", "4.0.5"))
+        assertTrue(isExpectedReleaseApkName("ESP32-Car-v4.0.6.apk", "4.0.6"))
+        assertTrue(isExpectedReleaseApkName("esp32-car-v4.0.6.APK", "4.0.6"))
+        assertFalse(isExpectedReleaseApkName("ESP32-Car-v4.0.5.apk", "4.0.6"))
+        assertFalse(isExpectedReleaseApkName("another-app.apk", "4.0.6"))
     }
 
     @Test
