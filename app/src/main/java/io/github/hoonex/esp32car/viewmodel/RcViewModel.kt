@@ -8,6 +8,7 @@ import io.github.hoonex.esp32car.bluetooth.ClassicBluetoothManager
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
 import io.github.hoonex.esp32car.model.DriveDirection
 import io.github.hoonex.esp32car.model.TransportMode
+import io.github.hoonex.esp32car.network.LanArduinoOtaClient
 import io.github.hoonex.esp32car.network.RCClient
 import io.github.hoonex.esp32car.protocol.RcProtocol
 import io.github.hoonex.esp32car.utils.SettingsManager
@@ -74,6 +75,10 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     private var lastRequestedDevice: BluetoothDevice? = null
     private var migrationExpectedVersion: String? = null
     private var otaSourceVersion: String? = null
+    private var legacyFallbackAttempted = false
+    private var legacyFallbackFirmware: ByteArray? = null
+    private var legacyFallbackKey: String? = null
+    private var legacyFallbackIp: String? = null
 
     init {
         viewModelScope.launch {
@@ -136,9 +141,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                             "펌웨어 v$actual Bluetooth 부팅 확인 완료 · Wi-Fi는 필요할 때 다시 연결할 수 있습니다."
                         }
                     )
-                    _legacyMigrationSession.value = false
-                    migrationExpectedVersion = null
-                    otaSourceVersion = null
+                    clearMigrationTracking()
                     if (reportedIp.isNotBlank() && reportedIp != "0.0.0.0") refreshWifiStatus()
                 }
             }
@@ -177,11 +180,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnectBluetooth() {
-        if (!firmwareUpdateBusy()) {
-            _legacyMigrationSession.value = false
-            migrationExpectedVersion = null
-            otaSourceVersion = null
-        }
+        if (!firmwareUpdateBusy()) clearMigrationTracking()
         bluetooth.disconnect()
     }
 
@@ -431,6 +430,10 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         otaSourceVersion = sourceVersion
         val v3ToV4Migration = sourceVersion.trim().startsWith("3.")
         _legacyMigrationSession.value = v3ToV4Migration
+        legacyFallbackAttempted = false
+        legacyFallbackFirmware = null
+        legacyFallbackKey = null
+        legacyFallbackIp = null
 
         emergencyStop()
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
@@ -446,17 +449,13 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val bundle = withContext(Dispatchers.IO) { loadAndValidateBundledFirmware() }
                 .getOrElse {
-                    migrationExpectedVersion = null
-                    otaSourceVersion = null
-                    _legacyMigrationSession.value = false
+                    clearMigrationTracking()
                     failFirmwareUpdate(it.message ?: "번들 펌웨어 검증 실패")
                     return@launch
                 }
 
             if (sourceVersion == bundle.version) {
-                migrationExpectedVersion = null
-                otaSourceVersion = null
-                _legacyMigrationSession.value = false
+                clearMigrationTracking()
                 _firmwareUpdate.value = _firmwareUpdate.value.copy(
                     stage = FirmwareUpdateUiState.Stage.SUCCESS,
                     progress = 100,
@@ -466,9 +465,12 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Always keep the expected version until either Wi-Fi or Bluetooth proves the new boot.
-            // This is critical for v3.3.1: its HTTP OTA is valid, but DHCP can change the IP during
-            // reboot and the old implementation then reported a false failure while showing stale v3.3.1.
             migrationExpectedVersion = bundle.version
+            if (v3ToV4Migration) {
+                legacyFallbackFirmware = bundle.bytes
+                legacyFallbackKey = key
+                legacyFallbackIp = ip
+            }
 
             rcClient.uploadFirmware(
                 ip = ip,
@@ -479,7 +481,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                     _firmwareUpdate.value = _firmwareUpdate.value.copy(
                         stage = FirmwareUpdateUiState.Stage.UPLOADING,
                         progress = percent,
-                        message = "ESP32로 전송 중 · $percent%"
+                        message = "HTTP OTA 전송 중 · $percent%"
                     )
                 }
             ) { result ->
@@ -488,16 +490,14 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                         stage = FirmwareUpdateUiState.Stage.REBOOTING,
                         progress = 100,
                         message = if (v3ToV4Migration) {
-                            "플래시 전송 완료 · v${bundle.version} Wi-Fi + Bluetooth 이중 부팅 검증 중"
+                            "HTTP OTA 전송 완료 · v${bundle.version} 실제 부팅 확인 중"
                         } else {
                             "플래시 전송 완료 · v${bundle.version} 재부팅 검증 중"
                         }
                     )
                     verifyFirmwareAfterOta(ip, bundle.version, attempt = 0, v3ToV4Migration = v3ToV4Migration)
                 }.onFailure {
-                    migrationExpectedVersion = null
-                    otaSourceVersion = null
-                    _legacyMigrationSession.value = false
+                    clearMigrationTracking()
                     failFirmwareUpdate(it.message ?: "펌웨어 업데이트 실패")
                 }
             }
@@ -510,9 +510,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
             progress = 0,
             message = ""
         )
-        _legacyMigrationSession.value = false
-        migrationExpectedVersion = null
-        otaSourceVersion = null
+        clearMigrationTracking()
     }
 
     fun reloadTuningFromSettings() {
@@ -594,9 +592,7 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
                             progress = 100,
                             message = "펌웨어 v$actual Wi-Fi 부팅 확인 완료"
                         )
-                        _legacyMigrationSession.value = false
-                        migrationExpectedVersion = null
-                        otaSourceVersion = null
+                        clearMigrationTracking()
                     } else if (attempt < 10) {
                         verifyFirmwareAfterOta(originalIp, expectedVersion, attempt + 1, v3ToV4Migration)
                     } else {
@@ -616,12 +612,30 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishFirmwareVerificationTimeout(expectedVersion: String, v3ToV4Migration: Boolean) {
         if (_firmwareUpdate.value.stage == FirmwareUpdateUiState.Stage.SUCCESS) return
         val observed = bluetooth.btStatusResponse.value?.optString("fw").orEmpty()
+
+        // Field evidence from v3.3.1 showed a full HTTP upload followed by an authoritative
+        // Bluetooth STATUS that still reported v3.3.1. Only in that proven rollback case do we
+        // invoke the independent ArduinoOTA transport, and only once per user update request.
+        if (
+            v3ToV4Migration &&
+            observed.startsWith("3.") &&
+            observed != expectedVersion &&
+            !legacyFallbackAttempted &&
+            legacyFallbackFirmware != null &&
+            !legacyFallbackKey.isNullOrBlank()
+        ) {
+            attemptLegacyArduinoOtaFallback(expectedVersion)
+            return
+        }
+
         _firmwareUpdate.value = _firmwareUpdate.value.copy(
             stage = FirmwareUpdateUiState.Stage.ERROR,
             progress = 100,
             message = when {
+                observed.isNotBlank() && observed != expectedVersion && legacyFallbackAttempted ->
+                    "HTTP OTA와 ArduinoOTA 2차 경로 후에도 Bluetooth에서 v${observed}가 확인됩니다. 부팅 파티션 진단이 필요합니다."
                 observed.isNotBlank() && observed != expectedVersion ->
-                    "v$expectedVersion 전송 후 현재 Bluetooth에서 v${observed}가 확인됩니다. 전원을 유지하고 다시 시도하세요."
+                    "v$expectedVersion 전송 후 현재 Bluetooth에서 v${observed}가 확인됩니다."
                 v3ToV4Migration ->
                     "v$expectedVersion 전송은 끝났지만 Wi-Fi와 Bluetooth 모두에서 새 부팅을 확인하지 못했습니다. 재연결하면 늦게라도 자동으로 성공 판정합니다."
                 else ->
@@ -630,6 +644,69 @@ class RcViewModel(application: Application) : AndroidViewModel(application) {
         )
         // Keep migrationExpectedVersion on purpose. A late Bluetooth reconnect can still convert
         // this timeout into SUCCESS when the device reports the exact expected firmware version.
+    }
+
+    private fun attemptLegacyArduinoOtaFallback(expectedVersion: String) {
+        val firmware = legacyFallbackFirmware ?: return
+        val key = legacyFallbackKey?.takeIf { it.isNotBlank() } ?: return
+        val ip = settings.ipAddress.takeIf { it.isNotBlank() }
+            ?: legacyFallbackIp?.takeIf { it.isNotBlank() }
+            ?: run {
+                failFirmwareUpdate("3.3.1 ArduinoOTA 2차 경로를 시작할 ESP32 IP가 없습니다.")
+                return
+            }
+
+        legacyFallbackAttempted = true
+        _firmwareUpdate.value = _firmwareUpdate.value.copy(
+            stage = FirmwareUpdateUiState.Stage.REBOOTING,
+            progress = 0,
+            message = "HTTP OTA 후 v3.x 재부팅 확인 · ArduinoOTA 독립 경로로 1회 복구 시도"
+        )
+
+        viewModelScope.launch(Dispatchers.IO) {
+            // Give v3.3.1 time to restore its station link and ArduinoOTA UDP listener after reboot.
+            delay(1_500)
+            val result = LanArduinoOtaClient.upload(
+                remoteHost = ip,
+                firmware = firmware,
+                password = key,
+                onProgress = { sent, total ->
+                    val percent = if (total <= 0) 0 else ((sent * 100L) / total).toInt().coerceIn(0, 100)
+                    _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                        stage = FirmwareUpdateUiState.Stage.UPLOADING,
+                        progress = percent,
+                        message = "3.3.1 ArduinoOTA 복구 전송 중 · $percent%"
+                    )
+                }
+            )
+
+            withContext(Dispatchers.Main) {
+                result.onSuccess {
+                    _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                        stage = FirmwareUpdateUiState.Stage.REBOOTING,
+                        progress = 100,
+                        message = "ArduinoOTA 2차 전송 완료 · v$expectedVersion 실제 부팅 재검증 중"
+                    )
+                    verifyFirmwareAfterOta(ip, expectedVersion, attempt = 0, v3ToV4Migration = true)
+                }.onFailure { error ->
+                    _firmwareUpdate.value = _firmwareUpdate.value.copy(
+                        stage = FirmwareUpdateUiState.Stage.ERROR,
+                        progress = 100,
+                        message = "HTTP OTA 후 v3.x 복귀 + ArduinoOTA 2차 경로 실패: ${error.message ?: error.javaClass.simpleName}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun clearMigrationTracking() {
+        _legacyMigrationSession.value = false
+        migrationExpectedVersion = null
+        otaSourceVersion = null
+        legacyFallbackAttempted = false
+        legacyFallbackFirmware = null
+        legacyFallbackKey = null
+        legacyFallbackIp = null
     }
 
     private fun readBundledFirmwareVersion(): String = runCatching {
