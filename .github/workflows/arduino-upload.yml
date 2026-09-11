@@ -40,7 +40,7 @@ jobs:
 
           text = Path('firmware/ESP32_CAM_RC_Controller.ino').read_text(encoding='utf-8')
           for required in (
-              'FW_VERSION = "4.0.0"',
+              'FW_VERSION = "4.0.1"',
               'SerialBT.begin("ESP32_CAM_RC")',
               'bool startControlServer()',
               'bool startStreamServer()',
@@ -83,7 +83,7 @@ jobs:
           cp firmware/partitions.csv dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv
           cp tools/arduino/Upload-ESP32-Car.ps1 dist/arduino-sketch/Upload-ESP32-Car.ps1
           cat > dist/arduino-sketch/README.txt <<'EOF'
-          ESP32 Car v4.0.0 - canonical first install / recovery path
+          ESP32 Car v4.0.1 - canonical first install / recovery path
 
           Physically trusted first-install path:
           1. Open ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino in Arduino IDE.
@@ -114,7 +114,7 @@ jobs:
           test -s dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
           test -s dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv
           test -s dist/arduino-sketch/Upload-ESP32-Car.ps1
-          grep -F 'FW_VERSION = "4.0.0"' dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
+          grep -F 'FW_VERSION = "4.0.1"' dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
           grep -F 'arduino-cli upload --verbose' dist/arduino-sketch/Upload-ESP32-Car.ps1
 
       - name: Upload Arduino sketch package
