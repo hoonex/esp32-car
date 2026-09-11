@@ -331,27 +331,24 @@ object AppUpdater {
 
             val assets = release.optJSONArray("assets") ?: continue
             var exactApk: JSONObject? = null
-            var fallbackApk: JSONObject? = null
-            val expectedName = "ESP32-Car-v$version.apk"
             for (assetIndex in 0 until assets.length()) {
                 val asset = assets.optJSONObject(assetIndex) ?: continue
                 val name = asset.optString("name")
-                if (!name.endsWith(".apk", ignoreCase = true)) continue
-                if (fallbackApk == null) fallbackApk = asset
-                if (name.equals(expectedName, ignoreCase = true)) {
+                if (isExpectedReleaseApkName(name, version)) {
                     exactApk = asset
                     break
                 }
             }
 
-            val apk = exactApk ?: fallbackApk ?: continue
+            val apk = exactApk ?: continue
             val apkUrl = apk.optString("browser_download_url")
             if (apkUrl.isBlank()) continue
+            val expectedDigest = normalizeSha256Digest(apk.optString("digest")) ?: continue
 
             candidates += ReleaseInfo(
                 version = version,
                 apkUrl = apkUrl,
-                expectedDigest = apk.optString("digest").removePrefix("sha256:").lowercase(),
+                expectedDigest = expectedDigest,
                 releaseUrl = release.optString("html_url").ifBlank { RELEASES_PAGE }
             )
         }
@@ -373,6 +370,16 @@ object AppUpdater {
 
     private fun normalizeReleaseVersion(tag: String): String =
         tag.removePrefix("android-v").removePrefix("v").trim()
+
+    private fun isExpectedReleaseApkName(name: String, version: String): Boolean =
+        name.equals("ESP32-Car-v$version.apk", ignoreCase = true)
+
+    private fun normalizeSha256Digest(raw: String): String? {
+        val normalized = raw.trim().removePrefix("sha256:").lowercase()
+        return normalized.takeIf { digest ->
+            digest.length == 64 && digest.all { it in '0'..'9' || it in 'a'..'f' }
+        }
+    }
 
     private fun downloadAndValidate(
         activity: Activity,
@@ -433,7 +440,7 @@ object AppUpdater {
         }
 
         val actualDigest = digest.digest().joinToString("") { "%02x".format(it) }
-        if (release.expectedDigest.isNotBlank() && actualDigest != release.expectedDigest) {
+        if (actualDigest != release.expectedDigest) {
             tempFile.delete()
             error("APK SHA-256 검증 실패")
         }
