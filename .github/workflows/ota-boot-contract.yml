@@ -33,7 +33,7 @@ jobs:
           ! grep -F 'Update.end(true)' "$FW"
           grep -F 'esp_ota_set_boot_partition(target)' "$FW"
           grep -F 'boot->address != target->address' "$FW"
-          grep -F '"boot_committed":true' "$FW"
+          grep -F '\"boot_committed\":true' "$FW"
           grep -F 'if (!controlAuthorized(req)) return sendUnauthorized(req);' "$FW"
           grep -F 'versionCode = 31' "$APP"
           grep -F 'versionName = "4.0.7"' "$APP"
@@ -53,7 +53,7 @@ jobs:
           end = text.index('Update.end()', begin)
           set_boot = text.index('esp_ota_set_boot_partition(target)', end)
           verify_boot = text.index('boot->address != target->address', set_boot)
-          success = text.index('"boot_committed":true', verify_boot)
+          success = text.index('\\"boot_committed\\":true', verify_boot)
           if not (ota < begin < end < set_boot < verify_boot < success):
               raise SystemExit('OTA success must follow complete write and boot partition proof')
           print('OTA boot commit ordering verified')
