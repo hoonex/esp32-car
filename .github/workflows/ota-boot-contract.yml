@@ -1,0 +1,60 @@
+name: Verify OTA Boot Commit Contract
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'chore/**', 'hardening/**', 'release/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ota-boot-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify v3.3.1 to v4 boot handoff invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          FW='firmware/ESP32_CAM_RC_Controller.ino'
+          APP='app/build.gradle.kts'
+
+          grep -F '#include <esp_ota_ops.h>' "$FW"
+          grep -F 'static const char* FW_VERSION = "4.0.1";' "$FW"
+          grep -F 'esp_ota_mark_app_valid_cancel_rollback()' "$FW"
+          grep -F 'const esp_partition_t* target = nextUpdatePartition();' "$FW"
+          grep -F 'Update.end()' "$FW"
+          ! grep -F 'Update.end(true)' "$FW"
+          grep -F 'esp_ota_set_boot_partition(target)' "$FW"
+          grep -F 'boot->address != target->address' "$FW"
+          grep -F '"boot_committed":true' "$FW"
+          grep -F 'if (!controlAuthorized(req)) return sendUnauthorized(req);' "$FW"
+          grep -F 'versionCode = 31' "$APP"
+          grep -F 'versionName = "4.0.7"' "$APP"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('firmware/ESP32_CAM_RC_Controller.ino').read_text()
+          setup = text.index('void setup()')
+          mark = text.index('esp_ota_mark_app_valid_cancel_rollback()', setup)
+          pwm = text.index('setupMotorPwm();', setup)
+          bt = text.index('SerialBT.begin("ESP32_CAM_RC")', setup)
+          if not (setup < mark < pwm < bt):
+              raise SystemExit('OTA image must be marked valid before peripheral initialization')
+
+          ota = text.index('static esp_err_t otaUploadHandler')
+          begin = text.index('Update.begin', ota)
+          end = text.index('Update.end()', begin)
+          set_boot = text.index('esp_ota_set_boot_partition(target)', end)
+          verify_boot = text.index('boot->address != target->address', set_boot)
+          success = text.index('"boot_committed":true', verify_boot)
+          if not (ota < begin < end < set_boot < verify_boot < success):
+              raise SystemExit('OTA success must follow complete write and boot partition proof')
+          print('OTA boot commit ordering verified')
+          PY
