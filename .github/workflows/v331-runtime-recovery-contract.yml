@@ -28,6 +28,7 @@ jobs:
           ROUTE='app/src/main/java/io/github/hoonex/esp32car/network/AndroidNetworkRoute.kt'
           MAIN='app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt'
           APP='app/build.gradle.kts'
+          TEST='app/src/test/java/io/github/hoonex/esp32car/network/LanArduinoOtaClientTest.kt'
 
           grep -F 'Icons.Default.Settings' "$SCREEN"
           ! grep -F 'Icons.Default.Stop' "$SCREEN"
@@ -41,7 +42,12 @@ jobs:
 
           grep -F 'AndroidNetworkRoute.findWifiRoute(host)' "$LAN"
           grep -F 'ArduinoOtaClient.upload(' "$LAN"
+          grep -F 'ESP32 ArduinoOTA는 이 연결 전에 내부 Update.begin()을 실행합니다.' "$LAN"
+          grep -F '앱 재시도로는 파티션 테이블을 바꿀 수 없습니다.' "$LAN"
           ! grep -F 'ServerSocket' "$LAN"
+          grep -F 'authenticatedWithoutCallbackExplainsPreCallbackUpdateBegin' "$TEST"
+          grep -F 'unrelatedNetworkFailureIsNotMisclassifiedAsPartitionFailure' "$TEST"
+
           grep -F 'NetworkCapabilities.TRANSPORT_WIFI' "$ROUTE"
           grep -F 'AndroidNetworkRoute.initialize(applicationContext)' "$MAIN"
 
