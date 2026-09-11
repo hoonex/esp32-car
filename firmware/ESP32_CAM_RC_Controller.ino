@@ -1,4 +1,4 @@
-// ESP32-CAM RC Controller v4.0.0
+// ESP32-CAM RC Controller v4.0.1
 // Rebuilt from the user's original working v3.0 sketch.
 // Architecture: Bluetooth = drive/safety, Wi-Fi = camera/status/HTTP OTA.
 // Target: AI Thinker ESP32-CAM + OV2640 + Keyestudio/2WD chassis + L298N.
@@ -11,6 +11,7 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <esp_system.h>
+#include <esp_ota_ops.h>
 
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
@@ -47,7 +48,7 @@ static const int MOTOR_L_CH_1 = 10;
 static const int MOTOR_L_CH_2 = 11;
 static const int FLASH_LED_CH = 12;
 
-static const char* FW_VERSION = "4.0.0";
+static const char* FW_VERSION = "4.0.1";
 static const int PROTOCOL_VERSION = 2;
 static const char* HARDWARE_PROFILE = "AI_THINKER_ESP32_CAM_2WD_L298N";
 static const uint32_t DRIVE_DEADMAN_MS = 650;
@@ -67,6 +68,7 @@ bool streamReady = false;
 bool pendingRestart = false;
 uint32_t restartAtMs = 0;
 uint32_t lastDriveCommandMs = 0;
+uint32_t lastCameraRetryMs = 0;
 bool driveActive = false;
 int currentSpeed = 255;
 int currentTrim = 0;
@@ -79,6 +81,35 @@ bool invertRight = false;
 sensor_t* cameraSensor = nullptr;
 httpd_handle_t controlHttpd = nullptr;
 httpd_handle_t streamHttpd = nullptr;
+
+const esp_partition_t* runningPartition() { return esp_ota_get_running_partition(); }
+const esp_partition_t* bootPartition() { return esp_ota_get_boot_partition(); }
+const esp_partition_t* nextUpdatePartition() { return esp_ota_get_next_update_partition(nullptr); }
+
+String partitionLabel(const esp_partition_t* partition) {
+  return partition ? String(partition->label) : String("none");
+}
+
+String partitionAddress(const esp_partition_t* partition) {
+  if (!partition) return "none";
+  char buffer[16];
+  snprintf(buffer, sizeof(buffer), "0x%06lX", (unsigned long)partition->address);
+  return String(buffer);
+}
+
+void logBootPartitions(const char* phase) {
+  const esp_partition_t* running = runningPartition();
+  const esp_partition_t* boot = bootPartition();
+  const esp_partition_t* next = nextUpdatePartition();
+  Serial.printf(
+    "[BOOT] %s running=%s@%s boot=%s@%s next=%s@%s reset=%d\n",
+    phase,
+    partitionLabel(running).c_str(), partitionAddress(running).c_str(),
+    partitionLabel(boot).c_str(), partitionAddress(boot).c_str(),
+    partitionLabel(next).c_str(), partitionAddress(next).c_str(),
+    (int)esp_reset_reason()
+  );
+}
 
 void loadWifiCredentials() {
   preferences.begin("wifi_creds", true);
@@ -256,6 +287,7 @@ bool retryCamera() {
     cameraSensor = nullptr;
     delay(100);
   }
+  lastCameraRetryMs = millis();
   return startCamera();
 }
 
@@ -263,6 +295,9 @@ String statusJson(bool includeKey) {
   String ip = wifiConnected ? WiFi.localIP().toString() : "";
   String ssid = wifiConnected ? WiFi.SSID() : wifiSsid;
   long rssi = wifiConnected ? WiFi.RSSI() : 0;
+  const esp_partition_t* running = runningPartition();
+  const esp_partition_t* boot = bootPartition();
+  const esp_partition_t* next = nextUpdatePartition();
   String json = "{";
   json += "\"profile\":\"" + String(HARDWARE_PROFILE) + "\",";
   json += "\"board\":\"AI Thinker ESP32-CAM\",";
@@ -283,6 +318,13 @@ String statusJson(bool includeKey) {
   json += "\"http_ready\":" + String(httpReady ? "true" : "false") + ",";
   json += "\"stream_ready\":" + String(streamReady ? "true" : "false") + ",";
   json += "\"stream_fps\":" + String(streamFps) + ",";
+  json += "\"running_partition\":\"" + partitionLabel(running) + "\",";
+  json += "\"running_address\":\"" + partitionAddress(running) + "\",";
+  json += "\"boot_partition\":\"" + partitionLabel(boot) + "\",";
+  json += "\"boot_address\":\"" + partitionAddress(boot) + "\",";
+  json += "\"next_partition\":\"" + partitionLabel(next) + "\",";
+  json += "\"next_address\":\"" + partitionAddress(next) + "\",";
+  json += "\"reset_reason\":" + String((int)esp_reset_reason()) + ",";
   json += "\"ota\":true,";
   json += "\"heap\":" + String(ESP.getFreeHeap());
   if (includeKey) json += ",\"ota_key\":\"" + otaKey + "\"";
@@ -310,6 +352,7 @@ static const char* STREAM_BOUNDARY = "\r\n--frame\r\n";
 static const char* STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 static esp_err_t streamHandler(httpd_req_t* req) {
+  if (!controlAuthorized(req)) return sendUnauthorized(req);
   if (!cameraReady) return ESP_FAIL;
   esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
@@ -334,6 +377,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 }
 
 static esp_err_t captureHandler(httpd_req_t* req) {
+  if (!controlAuthorized(req)) return sendUnauthorized(req);
   if (!cameraReady) return httpd_resp_send_500(req);
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return httpd_resp_send_500(req);
@@ -416,7 +460,27 @@ static esp_err_t otaUploadHandler(httpd_req_t* req) {
     httpd_resp_set_status(req, "400 Bad Request");
     return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"empty_firmware\"}");
   }
+
+  const esp_partition_t* running = runningPartition();
+  const esp_partition_t* target = nextUpdatePartition();
+  if (!running || !target || target->address == running->address) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"no_safe_ota_partition\"}");
+  }
+  if ((size_t)req->content_len > target->size) {
+    httpd_resp_set_status(req, "413 Payload Too Large");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"firmware_too_large_for_ota_partition\"}");
+  }
+
   motorsStop();
+  Serial.printf(
+    "[OTA] writing %d bytes running=%s@%s target=%s@%s size=%lu\n",
+    req->content_len,
+    partitionLabel(running).c_str(), partitionAddress(running).c_str(),
+    partitionLabel(target).c_str(), partitionAddress(target).c_str(),
+    (unsigned long)target->size
+  );
+
   if (!Update.begin(req->content_len, U_FLASH)) {
     httpd_resp_set_status(req, "500 Internal Server Error");
     return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"update_begin_failed\"}");
@@ -438,15 +502,43 @@ static esp_err_t otaUploadHandler(httpd_req_t* req) {
     }
     remaining -= received;
   }
-  if (!Update.end(true)) {
+
+  // begin() was given the exact Content-Length, so a normal end() must consume every byte.
+  // Do not use end(true): a short upload must never be accepted as an OTA candidate.
+  if (!Update.end() || !Update.isFinished()) {
     httpd_resp_set_status(req, "500 Internal Server Error");
     return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"verification_failed\"}");
   }
+
+  // Arduino Update normally selects the new OTA slot. Explicitly prove and, if needed,
+  // re-assert it because v3.3.1 -> v4 field testing showed complete uploads rebooting back
+  // into the old slot. Success is not reported until the bootloader target is exact.
+  const esp_partition_t* boot = bootPartition();
+  if (!boot || boot->address != target->address) {
+    esp_err_t bootErr = esp_ota_set_boot_partition(target);
+    if (bootErr != ESP_OK) {
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      char response[128];
+      snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"boot_partition_set_failed\",\"code\":%d}", (int)bootErr);
+      return httpd_resp_sendstr(req, response);
+    }
+  }
+
+  boot = bootPartition();
+  if (!boot || boot->address != target->address) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"boot_partition_verify_failed\"}");
+  }
+
+  logBootPartitions("ota-committed");
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Connection", "close");
-  esp_err_t result = httpd_resp_sendstr(req, "{\"ok\":true,\"transport\":\"http\",\"rebooting\":true}");
+  String response = "{\"ok\":true,\"transport\":\"http\",\"boot_committed\":true,\"boot_partition\":\"";
+  response += partitionLabel(boot);
+  response += "\",\"boot_address\":\"" + partitionAddress(boot) + "\",\"rebooting\":true}";
+  esp_err_t result = httpd_resp_send(req, response.c_str(), response.length());
   pendingRestart = true;
-  restartAtMs = millis() + 900;
+  restartAtMs = millis() + 1200;
   return result;
 }
 
@@ -519,6 +611,7 @@ bool connectWifiAndStartServices(bool announceBt) {
   wifiConnected = true;
   // Critical: OTA/status starts even if the camera is missing or unhealthy.
   startControlServer();
+  lastCameraRetryMs = millis();
   if (startCamera()) startStreamServer();
   String ip = WiFi.localIP().toString();
   Serial.printf("[WiFi] connected: %s\n", ip.c_str());
@@ -605,14 +698,22 @@ void handleSerialCommand(String cmd) {
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(80);
+
+  // If the bootloader entered this image as a pending OTA candidate, commit it before
+  // initializing motors, Bluetooth or camera. A peripheral startup fault must not cause
+  // an otherwise valid OTA image to be silently rolled back to v3.3.1.
+  esp_err_t validity = esp_ota_mark_app_valid_cancel_rollback();
+  Serial.printf("[BOOT] mark-valid result=%d\n", (int)validity);
+  logBootPartitions("setup-entry");
+
   setupMotorPwm();
   motorsStop();
   loadMotorConfig();
   loadWifiCredentials();
   otaKey = loadOrCreateOtaKey();
   bool btReady = SerialBT.begin("ESP32_CAM_RC");
-  Serial.println("\n===== ESP32-CAM RC v4.0.0 =====");
+  Serial.println("\n===== ESP32-CAM RC v4.0.1 =====");
   Serial.println("Baseline: original working v3.0 motor/camera profile");
   Serial.printf("Bluetooth: %s\n", btReady ? "ready" : "FAILED");
   Serial.println("Control: Bluetooth always on");
@@ -643,8 +744,16 @@ void loop() {
     // HTTP servers bind to all interfaces, so an existing server remains usable after reconnect.
     // If this is a late first association, create services now.
     startControlServer();
+    lastCameraRetryMs = millis();
     if (startCamera()) startStreamServer();
     Serial.printf("[WiFi] link restored: %s\n", WiFi.localIP().toString().c_str());
+  }
+
+  // Camera is non-safety-critical. Retry only while the car is stationary so a failed sensor
+  // cannot repeatedly interrupt active Bluetooth driving.
+  if (stationNowConnected && !cameraReady && !driveActive && millis() - lastCameraRetryMs >= 5000) {
+    lastCameraRetryMs = millis();
+    if (retryCamera()) startStreamServer();
   }
 
   if (pendingRestart && millis() >= restartAtMs) {
