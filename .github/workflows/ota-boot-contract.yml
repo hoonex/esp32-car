@@ -35,8 +35,8 @@ jobs:
           grep -F 'boot->address != target->address' "$FW"
           grep -F '\"boot_committed\":true' "$FW"
           grep -F 'if (!controlAuthorized(req)) return sendUnauthorized(req);' "$FW"
-          grep -F 'versionCode = 31' "$APP"
-          grep -F 'versionName = "4.0.7"' "$APP"
+          grep -F 'versionCode = 32' "$APP"
+          grep -F 'versionName = "4.0.8"' "$APP"
 
           python3 - <<'PY'
           from pathlib import Path

@@ -39,6 +39,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import io.github.hoonex.esp32car.bluetooth.ConnectionState
+import io.github.hoonex.esp32car.network.AndroidNetworkRoute
 import io.github.hoonex.esp32car.protocol.RcProtocol
 import io.github.hoonex.esp32car.ui.components.AppUpdateControl
 import io.github.hoonex.esp32car.ui.screens.FreshCarScreen
@@ -53,6 +54,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AndroidNetworkRoute.initialize(applicationContext)
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)

@@ -27,7 +27,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -245,6 +245,7 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
     var cameraStreaming by remember { mutableStateOf(false) }
     var wifiDialog by remember { mutableStateOf(false) }
     var updateDialog by remember { mutableStateOf(false) }
+    var settingsDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     val reportedIp = wifiStatus?.optString("ip")
@@ -266,6 +267,9 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
     val httpAdvertised = wifiStatus?.optBoolean("http_ready", true) ?: false
     val otaHttpReady = ip.isNotBlank() && controlKey.isNotBlank() && httpConfirmed && otaAdvertised && httpAdvertised
     val cameraAttemptReady = ip.isNotBlank() && controlKey.isNotBlank()
+    val firmwareBusy = firmware.stage == FirmwareUpdateUiState.Stage.PREPARING ||
+        firmware.stage == FirmwareUpdateUiState.Stage.UPLOADING ||
+        firmware.stage == FirmwareUpdateUiState.Stage.REBOOTING
 
     LaunchedEffect(Unit) {
         viewModel.updateSpeed(255f)
@@ -315,7 +319,9 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
         CameraCanvas(
             ip = ip,
             controlKey = controlKey,
-            enabled = cameraAttemptReady,
+            // 3.3.1 is resource constrained. Closing MJPEG before the firmware dialog opens gives
+            // its OTA code the maximum heap/socket headroom and prevents reconnect churn mid-flash.
+            enabled = cameraAttemptReady && !updateDialog && !firmwareBusy,
             onStreamingChanged = { cameraStreaming = it },
             modifier = Modifier
                 .fillMaxSize()
@@ -329,17 +335,18 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
             onLight = { viewModel.updateLight(if (light > 0f) 0f else 255f) },
             onWifi = { wifiDialog = true },
             onUpdate = { updateDialog = true },
-            onStop = {
+            onSettings = {
                 throttle = 0f
                 steering = 0f
                 tankLeft = 0f
                 tankRight = 0f
                 viewModel.emergencyStop()
+                settingsDialog = true
             },
             modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().height(headerHeight)
         )
 
-        if (!cameraStreaming) {
+        if (!cameraStreaming && !updateDialog && !firmwareBusy) {
             Surface(
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = headerHeight + 14.dp),
                 color = Panel,
@@ -490,6 +497,10 @@ private fun FreshDriveScreen(viewModel: RcViewModel) {
             onUpdate = { viewModel.updateFirmwareFromBundled() }
         )
     }
+
+    if (settingsDialog) {
+        FreshSettingsDialog(viewModel = viewModel, onDismiss = { settingsDialog = false })
+    }
 }
 
 @Composable
@@ -500,7 +511,7 @@ private fun TopBar(
     onLight: () -> Unit,
     onWifi: () -> Unit,
     onUpdate: () -> Unit,
-    onStop: () -> Unit,
+    onSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -542,16 +553,7 @@ private fun TopBar(
             HeaderAction(Icons.Default.FlashlightOn, if (lightOn) Mint else TextMuted, onLight)
             HeaderAction(Icons.Default.Wifi, Blue, onWifi)
             HeaderAction(Icons.Default.Download, TextMain, onUpdate)
-            Surface(onClick = onStop, color = Red, shape = RoundedCornerShape(13.dp)) {
-                Row(
-                    Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Stop, null, Modifier.size(15.dp), tint = Color.White)
-                    Spacer(Modifier.width(5.dp))
-                    Text("STOP", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Black)
-                }
-            }
+            HeaderAction(Icons.Default.Settings, TextMain, onSettings)
         }
     }
 }
@@ -968,7 +970,7 @@ private fun FirmwareDialog(
                 Text(wifiDetail, color = if (canUpdate) Blue else Amber, fontSize = 8.sp)
                 if (migration) {
                     Text(
-                        "3.x → 4.x 전환: HTTP OTA 전송 후 Wi-Fi와 Bluetooth STATUS를 둘 다 확인해 실제 새 펌웨어 부팅까지 검증합니다.",
+                        "3.x → 4.x 전환: 카메라를 먼저 정지하고 HTTP OTA를 시도합니다. 3.3.1이 HTTP 플래시를 거부하거나 이전 펌웨어로 복귀하면 독립 ArduinoOTA 경로로 자동 전환합니다.",
                         color = Amber,
                         fontSize = 8.sp
                     )
