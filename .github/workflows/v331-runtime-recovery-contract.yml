@@ -1,0 +1,51 @@
+name: Verify v3.3.1 Runtime Recovery Contract
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'chore/**', 'release/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-recovery-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify UI and OTA recovery invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCREEN='app/src/main/java/io/github/hoonex/esp32car/ui/screens/FreshCarScreen.kt'
+          CLIENT='app/src/main/java/io/github/hoonex/esp32car/network/RCClient.kt'
+          LAN='app/src/main/java/io/github/hoonex/esp32car/network/LanArduinoOtaClient.kt'
+          ROUTE='app/src/main/java/io/github/hoonex/esp32car/network/AndroidNetworkRoute.kt'
+          MAIN='app/src/main/java/io/github/hoonex/esp32car/MainActivity.kt'
+          APP='app/build.gradle.kts'
+
+          grep -F 'Icons.Default.Settings' "$SCREEN"
+          ! grep -F 'Icons.Default.Stop' "$SCREEN"
+          ! grep -F 'Text("STOP"' "$SCREEN"
+          grep -F 'enabled = cameraAttemptReady && !updateDialog && !firmwareBusy' "$SCREEN"
+          grep -F 'FreshSettingsDialog(viewModel = viewModel' "$SCREEN"
+
+          grep -F 'update_begin_failed' "$CLIENT"
+          grep -F 'runLanArduinoFallback(' "$CLIENT"
+          grep -F 'arduinoota-network-bound' "$CLIENT"
+
+          grep -F 'AndroidNetworkRoute.findWifiRoute(host)' "$LAN"
+          grep -F 'ArduinoOtaClient.upload(' "$LAN"
+          ! grep -F 'ServerSocket' "$LAN"
+          grep -F 'NetworkCapabilities.TRANSPORT_WIFI' "$ROUTE"
+          grep -F 'AndroidNetworkRoute.initialize(applicationContext)' "$MAIN"
+
+          grep -F 'versionCode = 32' "$APP"
+          grep -F 'versionName = "4.0.8"' "$APP"
+
+          echo 'v3.3.1 runtime recovery contract OK'
