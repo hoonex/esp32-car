@@ -22,8 +22,8 @@ android {
         applicationId = "io.github.hoonex.esp32car"
         minSdk = 24
         targetSdk = 36
-        versionCode = 29
-        versionName = "4.0.5"
+        versionCode = 30
+        versionName = "4.0.6"
 
         ndk {
             abiFilters += "arm64-v8a"
