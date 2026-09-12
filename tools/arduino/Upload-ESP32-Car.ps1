@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 
 $CoreVersion = "3.3.0"
 $BoardBase = "esp32:esp32:esp32cam"
-$RecoveryFqbn = "esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200"
+$RecoveryFqbn = "esp32:esp32:esp32cam:EraseFlash=all"
 $EspressifIndex = "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
 
 function Fail([string]$Message) {
@@ -104,9 +104,6 @@ $detailsText = $details | Out-String
 if ($detailsText -notmatch 'EraseFlash') {
     Fail "Installed ESP32 core does not expose EraseFlash; refusing a non-full recovery flash."
 }
-if ($detailsText -notmatch 'UploadSpeed') {
-    Fail "Installed ESP32 core does not expose UploadSpeed; refusing an unknown upload recipe."
-}
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("esp32-car-full-recovery-" + [guid]::NewGuid().ToString("N"))
 $sketchDir = Join-Path $tempRoot "ESP32_CAM_RC_Controller"
@@ -118,7 +115,7 @@ try {
     Write-Host "Compiling exact recovery sketch with OTA partition table..." -ForegroundColor Cyan
     Invoke-Arduino @("compile", "--fqbn", $RecoveryFqbn, $sketchDir)
 
-    Write-Host "FULL FLASH upload through Arduino's official upload recipe..." -ForegroundColor Yellow
+    Write-Host "FULL FLASH upload through Arduino's official AI Thinker upload recipe..." -ForegroundColor Yellow
     Write-Host "If connection fails: GPIO0 -> GND, reset/power-cycle, then retry. Close Serial Monitor first."
     Invoke-Arduino @("upload", "--verbose", "--port", $Port, "--fqbn", $RecoveryFqbn, $sketchDir)
 
