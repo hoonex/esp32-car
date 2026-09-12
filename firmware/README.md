@@ -13,13 +13,15 @@ Keep these two files together inside one sketch folder named `ESP32_CAM_RC_Contr
 
 Then use Espressif Arduino-ESP32 core **3.3.0**, the AI Thinker ESP32-CAM profile, and a **full-chip erase before upload**. The packaged helper/tool uses the equivalent recovery FQBN:
 
-`esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200`
+`esp32:esp32:esp32cam:EraseFlash=all`
 
-The conservative 115200 baud is intentional for recovery reliability.
+Upload speed and reset behavior are left to the pinned AI Thinker board profile so the recovery tool follows Arduino's official upload recipe instead of inventing another serial recipe.
 
 ## Why the adjacent `partitions.csv` is mandatory
 
-The application image is large enough to boot in a large single-app ESP32 partition layout. That can make a bad recovery look successful: Bluetooth/camera firmware boots, but there is no inactive OTA app partition for `Update.begin()`.
+Core 3.3.0 reports the AI Thinker ESP32-CAM default partition scheme as **Huge APP (3MB No OTA/1MB SPIFFS)**. That is a large single-app layout with no OTA slot.
+
+The application image is small enough to boot in that layout. This can make a bad migration look successful: Bluetooth/camera firmware boots, but there is no inactive OTA app partition for `Update.begin()`.
 
 The repo `partitions.csv` explicitly creates:
 
@@ -36,7 +38,7 @@ Opening/uploading the `.ino` without its adjacent `partitions.csv` can therefore
 3. Use ESP32 board core 3.3.0 and select AI Thinker ESP32-CAM.
 4. Select the correct COM port.
 5. Enable **Erase All Flash Before Sketch Upload**.
-6. Prefer 115200 upload speed for recovery.
+6. Leave the board's normal upload recipe/speed unchanged.
 7. Upload the sketch.
 8. If auto-download does not work: GPIO0 -> GND, reset/power-cycle, upload, then disconnect GPIO0 from GND and reset/power-cycle again.
 9. Confirm `ESP32_CAM_RC` appears over Classic Bluetooth.
