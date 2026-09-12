@@ -37,11 +37,12 @@ jobs:
           set -euo pipefail
           arduino-cli board details --fqbn esp32:esp32:esp32cam | tee /tmp/esp32cam-board.txt
           grep -F 'EraseFlash' /tmp/esp32cam-board.txt
-          grep -F 'UploadSpeed' /tmp/esp32cam-board.txt
+          grep -F 'PartitionScheme=huge_app' /tmp/esp32cam-board.txt
+          grep -F 'PartitionScheme=min_spiffs' /tmp/esp32cam-board.txt
 
-          # Fail closed if the pinned core does not accept the exact recovery FQBN.
+          # Fail closed if the pinned core does not accept full-chip erase.
           arduino-cli board details \
-            --fqbn 'esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200' \
+            --fqbn 'esp32:esp32:esp32cam:EraseFlash=all' \
             > /tmp/esp32cam-recovery-board.txt
           test -s /tmp/esp32cam-recovery-board.txt
 
@@ -105,8 +106,9 @@ jobs:
           ESP32 Car v4.0.1 - Arduino FULL recovery
 
           IMPORTANT: DO NOT move/open/upload ESP32_CAM_RC_Controller.ino by itself.
-          partitions.csv MUST remain beside the .ino. Without it, the AI Thinker
-          ESP32-CAM can fall back to a large single-app layout with no OTA slot.
+          partitions.csv MUST remain beside the .ino. Core 3.3.0 reports the
+          AI Thinker ESP32-CAM default as Huge APP (3MB No OTA/1MB SPIFFS).
+          Without the adjacent partitions.csv, the app can boot but have no OTA slot.
 
           Recommended Arduino IDE recovery:
           1. Keep the entire ESP32_CAM_RC_Controller folder together.
@@ -114,7 +116,7 @@ jobs:
           3. Use Espressif ESP32 board core 3.3.0 and AI Thinker ESP32-CAM.
           4. Select the correct COM port.
           5. Set Erase All Flash Before Sketch Upload = Enabled.
-          6. Use 115200 upload speed for the conservative recovery path.
+          6. Leave the board's normal upload speed/reset recipe unchanged.
           7. Upload.
           8. If download mode is manual: GPIO0 -> GND, reset/power, upload,
              then disconnect GPIO0 from GND and reset/power again.
@@ -132,7 +134,7 @@ jobs:
         run: |
           set -euo pipefail
           arduino-cli compile \
-            --fqbn 'esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200' \
+            --fqbn 'esp32:esp32:esp32cam:EraseFlash=all' \
             dist/arduino-sketch/ESP32_CAM_RC_Controller
 
       - name: Verify package and helper contract
@@ -146,8 +148,9 @@ jobs:
           grep -F 'FW_VERSION = "4.0.1"' "$INO"
           grep -F 'ota_0' "$PART"
           grep -F 'ota_1' "$PART"
-          grep -F 'EraseFlash=all,UploadSpeed=115200' "$HELPER"
+          grep -F 'esp32:esp32:esp32cam:EraseFlash=all' "$HELPER"
           grep -F 'ESP32_CAM_RC_Controller' "$HELPER"
+          ! grep -F 'UploadSpeed=' "$HELPER"
           ! grep -F 'esptool' "$HELPER"
 
       - name: Upload Arduino full recovery package
@@ -199,11 +202,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & '.\dist\ESP32-Car-Arduino-Recovery.exe' --self-test
-          if ($LASTEXITCODE -ne 0) { throw "recovery self-test failed: $LASTEXITCODE" }
+          $process = Start-Process `
+            -FilePath '.\dist\ESP32-Car-Arduino-Recovery.exe' `
+            -ArgumentList '--self-test' `
+            -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "recovery self-test failed: $($process.ExitCode)" }
 
           $src = Get-Content tools/flasher/flash_esp32.py -Raw
-          if ($src -notmatch 'EraseFlash=all,UploadSpeed=115200') { throw 'full erase recovery FQBN missing' }
+          if ($src -notmatch 'esp32:esp32:esp32cam:EraseFlash=all') { throw 'full erase recovery FQBN missing' }
+          if ($src -match 'UploadSpeed=') { throw 'unsupported upload speed override returned' }
           if ($src -match 'import esptool') { throw 'raw esptool path returned' }
           if ($src -notmatch 'arduino-cli') { throw 'Arduino CLI recovery path missing' }
 
