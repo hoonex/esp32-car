@@ -1,11 +1,19 @@
-# ESP32 Car First Installer
+# ESP32 Car Arduino Full Recovery
 
-The custom Windows first-install flasher is **not a validated recovery path on the physical ESP32-CAM car**. The package has passed CI checks for file presence and flash offsets, but repeated real-device attempts have not matched the reliability of uploading the Arduino sketch directly.
+The old custom Windows raw-binary flasher is no longer the recovery implementation. Real-device attempts did not match the reliability of the Arduino source upload, so the GUI now wraps the same Arduino toolchain path instead of calling Python `esptool` directly.
 
-## Canonical first install
+`ESP32-Car-Arduino-Recovery.exe` bundles:
 
-Use Arduino IDE to upload `firmware/ESP32_CAM_RC_Controller.ino` with `firmware/partitions.csv` in the same sketch folder. That is the only first-install/recovery path currently treated as physically verified.
+- `arduino-cli`,
+- `ESP32_CAM_RC_Controller.ino`, and
+- the required adjacent `partitions.csv`.
 
-Do not tell users that `ESP32-Car-Installer.exe`, the merged factory binary, or the multi-image package is known-good until a physical board has been flashed and booted successfully with that exact path.
+On recovery it pins Arduino-ESP32 core 3.3.0, creates the exact sketch folder, compiles the source and uploads with:
 
-The Windows flasher code remains in the repository for diagnosis, but its CI result only proves that the executable/package was built, not that the ESP32-CAM accepted and booted the image.
+`esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200`
+
+That means the board is fully erased and Arduino itself writes the bootloader, partition table, boot_app0 and application using its official upload recipe. The previous separate `esptool erase-flash` + hard-coded raw image write path is not used.
+
+The GUI keeps the complete Arduino CLI output in a scrollable log. If a real board still fails, the final log should distinguish download-mode/serial-port failures from compile/core failures instead of hiding them behind a generic installer error.
+
+A CI-green EXE is still not called physically verified until the real AI Thinker ESP32-CAM is flashed and boots successfully. The manual Arduino recovery ZIP remains the fallback/source-of-truth path.
