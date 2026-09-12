@@ -10,9 +10,9 @@ The old custom Windows raw-binary flasher is no longer the recovery implementati
 
 On recovery it pins Arduino-ESP32 core 3.3.0, creates the exact sketch folder, compiles the source and uploads with:
 
-`esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200`
+`esp32:esp32:esp32cam:EraseFlash=all`
 
-That means the board is fully erased and Arduino itself writes the bootloader, partition table, boot_app0 and application using its official upload recipe. The previous separate `esptool erase-flash` + hard-coded raw image write path is not used.
+That means the board is fully erased and Arduino itself writes the bootloader, partition table, boot_app0 and application using its official AI Thinker upload recipe. Upload speed/reset behavior remain the pinned board profile defaults. The previous separate `esptool erase-flash` + hard-coded raw image write path is not used.
 
 The GUI keeps the complete Arduino CLI output in a scrollable log. If a real board still fails, the final log should distinguish download-mode/serial-port failures from compile/core failures instead of hiding them behind a generic installer error.
 
