@@ -39,12 +39,11 @@ jobs:
           grep -F 'EraseFlash' /tmp/esp32cam-board.txt
           grep -F 'UploadSpeed' /tmp/esp32cam-board.txt
 
-          # Compile using the exact recovery FQBN. This proves the pinned core
-          # accepts full-chip erase + conservative 115200 baud options.
-          arduino-cli compile \
+          # Fail closed if the pinned core does not accept the exact recovery FQBN.
+          arduino-cli board details \
             --fqbn 'esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200' \
-            --build-property 'compiler.warning_flags=-w' \
-            firmware/ESP32_CAM_RC_Controller.ino || true
+            > /tmp/esp32cam-recovery-board.txt
+          test -s /tmp/esp32cam-recovery-board.txt
 
       - name: Verify v4 hybrid recovery contract
         shell: bash
