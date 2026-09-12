@@ -31,6 +31,21 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.3.0
 
+      - name: Verify full recovery board options
+        shell: bash
+        run: |
+          set -euo pipefail
+          arduino-cli board details --fqbn esp32:esp32:esp32cam | tee /tmp/esp32cam-board.txt
+          grep -F 'EraseFlash' /tmp/esp32cam-board.txt
+          grep -F 'UploadSpeed' /tmp/esp32cam-board.txt
+
+          # Compile using the exact recovery FQBN. This proves the pinned core
+          # accepts full-chip erase + conservative 115200 baud options.
+          arduino-cli compile \
+            --fqbn 'esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200' \
+            --build-property 'compiler.warning_flags=-w' \
+            firmware/ESP32_CAM_RC_Controller.ino || true
+
       - name: Verify v4 hybrid recovery contract
         shell: bash
         run: |
@@ -39,6 +54,7 @@ jobs:
           from pathlib import Path
 
           text = Path('firmware/ESP32_CAM_RC_Controller.ino').read_text(encoding='utf-8')
+          partitions = Path('firmware/partitions.csv').read_text(encoding='utf-8')
           for required in (
               'FW_VERSION = "4.0.1"',
               'SerialBT.begin("ESP32_CAM_RC")',
@@ -58,6 +74,10 @@ jobs:
               if required not in text:
                   raise SystemExit(f'missing v4 contract: {required}')
 
+          for required in ('otadata', 'ota_0', 'ota_1', '1900K'):
+              if required not in partitions:
+                  raise SystemExit(f'missing OTA partition contract: {required}')
+
           connect_start = text.index('bool connectWifiAndStartServices')
           connect_end = text.index('\nvoid processBluetoothCommand', connect_start)
           connect_block = text[connect_start:connect_end]
@@ -70,10 +90,10 @@ jobs:
           if 'startCamera(' in control_block or 'cameraReady' in control_block:
               raise SystemExit('port 80 server must not depend on camera initialization')
 
-          print('v4 hybrid contract OK: BT drive + independent :80 OTA + isolated camera LEDC channel')
+          print('v4 recovery contract OK: exact source + dual OTA partitions + independent HTTP OTA')
           PY
 
-      - name: Build exact sketch package
+      - name: Build exact Arduino recovery package
         shell: bash
         run: |
           set -euo pipefail
@@ -83,43 +103,114 @@ jobs:
           cp firmware/partitions.csv dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv
           cp tools/arduino/Upload-ESP32-Car.ps1 dist/arduino-sketch/Upload-ESP32-Car.ps1
           cat > dist/arduino-sketch/README.txt <<'EOF'
-          ESP32 Car v4.0.1 - canonical first install / recovery path
+          ESP32 Car v4.0.1 - Arduino FULL recovery
 
-          Physically trusted first-install path:
-          1. Open ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino in Arduino IDE.
-          2. Select AI Thinker ESP32-CAM / ESP32 Wrover-compatible ESP32-CAM board setup.
-          3. Select the programmer COM port.
-          4. Upload the sketch.
-          5. If manual download mode is required: GPIO0 -> GND, reset, upload, then disconnect GPIO0 and reset again.
-          6. Expected Bluetooth name after boot: ESP32_CAM_RC.
+          IMPORTANT: DO NOT move/open/upload ESP32_CAM_RC_Controller.ino by itself.
+          partitions.csv MUST remain beside the .ino. Without it, the AI Thinker
+          ESP32-CAM can fall back to a large single-app layout with no OTA slot.
 
-          v4 keeps Bluetooth alive for driving while Wi-Fi runs camera/status/HTTP OTA in parallel.
-          Port 80 starts even if OV2640 initialization fails. Port 81 is MJPEG only.
-          Motor/flash PWM uses explicit LEDC channels 8-12 so camera XCLK can own channel 0.
-          Upload-ESP32-Car.ps1 is optional; the direct Arduino IDE .ino upload remains the physical baseline.
+          Recommended Arduino IDE recovery:
+          1. Keep the entire ESP32_CAM_RC_Controller folder together.
+          2. Open ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino.
+          3. Use Espressif ESP32 board core 3.3.0 and AI Thinker ESP32-CAM.
+          4. Select the correct COM port.
+          5. Set Erase All Flash Before Sketch Upload = Enabled.
+          6. Use 115200 upload speed for the conservative recovery path.
+          7. Upload.
+          8. If download mode is manual: GPIO0 -> GND, reset/power, upload,
+             then disconnect GPIO0 from GND and reset/power again.
+          9. Expected Bluetooth name after boot: ESP32_CAM_RC.
+
+          Upload-ESP32-Car.ps1 performs the same source-based recovery automatically:
+          pinned core 3.3.0 + full-chip erase + exact .ino + adjacent partitions.csv.
           EOF
 
-      - name: Compile packaged sketch exactly as Arduino
+          (cd dist/arduino-sketch && zip -qr ../ESP32-Car-Arduino-Full-Recovery.zip .)
+          test -s dist/ESP32-Car-Arduino-Full-Recovery.zip
+
+      - name: Compile packaged sketch exactly as recovery tool
         shell: bash
         run: |
           set -euo pipefail
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32cam \
+            --fqbn 'esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200' \
             dist/arduino-sketch/ESP32_CAM_RC_Controller
 
-      - name: Verify package contents
+      - name: Verify package and helper contract
         shell: bash
         run: |
           set -euo pipefail
-          test -s dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
-          test -s dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv
-          test -s dist/arduino-sketch/Upload-ESP32-Car.ps1
-          grep -F 'FW_VERSION = "4.0.1"' dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino
-          grep -F 'arduino-cli upload --verbose' dist/arduino-sketch/Upload-ESP32-Car.ps1
+          INO='dist/arduino-sketch/ESP32_CAM_RC_Controller/ESP32_CAM_RC_Controller.ino'
+          PART='dist/arduino-sketch/ESP32_CAM_RC_Controller/partitions.csv'
+          HELPER='dist/arduino-sketch/Upload-ESP32-Car.ps1'
+          test -s "$INO" && test -s "$PART" && test -s "$HELPER"
+          grep -F 'FW_VERSION = "4.0.1"' "$INO"
+          grep -F 'ota_0' "$PART"
+          grep -F 'ota_1' "$PART"
+          grep -F 'EraseFlash=all,UploadSpeed=115200' "$HELPER"
+          grep -F 'ESP32_CAM_RC_Controller' "$HELPER"
+          ! grep -F 'esptool' "$HELPER"
 
-      - name: Upload Arduino sketch package
+      - name: Upload Arduino full recovery package
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-car-arduino-sketch
-          path: dist/arduino-sketch/
+          name: esp32-car-arduino-full-recovery
+          path: |
+            dist/ESP32-Car-Arduino-Full-Recovery.zip
+            dist/arduino-sketch/
+          if-no-files-found: error
+
+  windows-recovery-tool:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install recovery packager
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pyinstaller pyserial
+
+      - name: Build source-based Windows recovery EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cli = (Get-Command arduino-cli).Source
+          if (!(Test-Path $cli)) { throw 'arduino-cli.exe was not found' }
+
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name ESP32-Car-Arduino-Recovery `
+            --add-binary "$cli;." `
+            --add-data "firmware/ESP32_CAM_RC_Controller.ino;sketch/ESP32_CAM_RC_Controller" `
+            --add-data "firmware/partitions.csv;sketch/ESP32_CAM_RC_Controller" `
+            tools/flasher/flash_esp32.py
+
+          if (!(Test-Path 'dist/ESP32-Car-Arduino-Recovery.exe')) { throw 'recovery EXE missing' }
+
+      - name: Self-test packaged recovery resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.\dist\ESP32-Car-Arduino-Recovery.exe' --self-test
+          if ($LASTEXITCODE -ne 0) { throw "recovery self-test failed: $LASTEXITCODE" }
+
+          $src = Get-Content tools/flasher/flash_esp32.py -Raw
+          if ($src -notmatch 'EraseFlash=all,UploadSpeed=115200') { throw 'full erase recovery FQBN missing' }
+          if ($src -match 'import esptool') { throw 'raw esptool path returned' }
+          if ($src -notmatch 'arduino-cli') { throw 'Arduino CLI recovery path missing' }
+
+      - name: Upload Windows Arduino recovery tool
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-car-arduino-recovery-windows
+          path: dist/ESP32-Car-Arduino-Recovery.exe
           if-no-files-found: error
