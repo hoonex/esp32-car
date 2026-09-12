@@ -14,7 +14,7 @@ from serial.tools import list_ports
 
 CORE_VERSION = "3.3.0"
 BOARD_BASE = "esp32:esp32:esp32cam"
-RECOVERY_FQBN = "esp32:esp32:esp32cam:EraseFlash=all,UploadSpeed=115200"
+RECOVERY_FQBN = "esp32:esp32:esp32cam:EraseFlash=all"
 ESPRESSIF_INDEX = "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
 
 
@@ -240,8 +240,6 @@ class RecoveryApp(tk.Tk):
         _, details = self._run(["board", "details", "--fqbn", BOARD_BASE])
         if "EraseFlash" not in details:
             raise RuntimeError("ESP32 core does not expose EraseFlash; refusing non-full recovery flash.")
-        if "UploadSpeed" not in details:
-            raise RuntimeError("ESP32 core does not expose UploadSpeed; refusing unknown upload recipe.")
 
     def _recovery_worker(self, port: str) -> None:
         assert self.sources is not None
